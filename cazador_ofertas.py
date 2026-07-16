@@ -84,17 +84,27 @@ DESCUENTO_MINIMO_PREMIUM = 50   # 50% o más -> canal premium
 ARCHIVO_HISTORIAL = "historial_ofertas.json"
 SEGUNDOS_ENTRE_MENSAJES = 2.5
 
+# Headers "de navegador real" (Chrome en Windows). Se agregaron las
+# cabeceras sec-ch-ua, que un Chrome real manda automaticamente y que
+# algunos sitios con proteccion anti-bot revisan para detectar robots.
+# Tambien se saco el "Referer" de Google y se cambio Sec-Fetch-Site a
+# "none", para simular que entramos escribiendo la URL directo (que es
+# mas realista para un robot que "visitar desde Google" sin serlo).
 CABECERAS = {
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36",
-    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
-    "Accept-Language": "es-CL,es;q=0.9,en;q=0.8",
-    "Accept-Encoding": "gzip, deflate",
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36",
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7",
+    "Accept-Language": "es-CL,es;q=0.9,en-US;q=0.8,en;q=0.7",
+    "Accept-Encoding": "gzip, deflate, br",
     "Connection": "keep-alive",
     "Upgrade-Insecure-Requests": "1",
-    "Referer": "https://www.google.com/",
     "Sec-Fetch-Dest": "document",
     "Sec-Fetch-Mode": "navigate",
-    "Sec-Fetch-Site": "cross-site",
+    "Sec-Fetch-Site": "none",
+    "Sec-Fetch-User": "?1",
+    "sec-ch-ua": '"Chromium";v="126", "Google Chrome";v="126", "Not.A/Brand";v="24"',
+    "sec-ch-ua-mobile": "?0",
+    "sec-ch-ua-platform": '"Windows"',
+    "Cache-Control": "max-age=0",
 }
 
 # Pequeña espera aleatoria antes de empezar, para no ser tan predecibles.
@@ -133,6 +143,24 @@ def extraer_bloque_next_data(html):
     fin = html.find("</script>", inicio)
     bloque_json = html[inicio:fin]
     return json.loads(bloque_json)
+
+
+def imprimir_diagnostico_bloqueo(respuesta):
+    """
+    Cuando una tienda nos rechaza, esto imprime las cabeceras que ELLOS
+    nos mandaron de vuelta. Sirve para detectar pistas de que sistema
+    de seguridad anti-bot estan usando (ej: 'cf-ray' es de Cloudflare,
+    'x-akamai...' es de Akamai, etc.), asi sabemos contra que estamos
+    peleando.
+    """
+    pistas_conocidas = ["cf-ray", "cf-mitigated", "server", "x-akamai-transformed",
+                         "x-akamai-request-id", "x-px-block", "x-datadome", "via"]
+    headers_relevantes = {
+        clave: valor for clave, valor in respuesta.headers.items()
+        if clave.lower() in pistas_conocidas
+    }
+    print(f"   🔬 Diagnóstico - Headers relevantes: {headers_relevantes}", flush=True)
+    print(f"   🔬 Diagnóstico - Todos los headers: {dict(respuesta.headers)}", flush=True)
 
 
 # ---------------------------------------------------------------------
@@ -230,6 +258,7 @@ def buscar_ofertas_paris():
 
     if respuesta.status_code != 200:
         print(f"   ❌ No pude acceder a Paris. Código: {respuesta.status_code}", flush=True)
+        imprimir_diagnostico_bloqueo(respuesta)
         return []
 
     sopa = BeautifulSoup(respuesta.text, "lxml")
@@ -314,6 +343,7 @@ def armar_slug_ripley(texto):
 def buscar_ofertas_ripley():
     print("🔍 Buscando ofertas en Ripley...", flush=True)
     productos_por_link = {}
+    ya_se_imprimio_diagnostico = False
 
     for categoria in CATEGORIAS_RIPLEY:
         try:
@@ -321,6 +351,9 @@ def buscar_ofertas_ripley():
 
             if respuesta.status_code != 200:
                 print(f"   ⚠️ No pude acceder a {categoria}. Código: {respuesta.status_code}", flush=True)
+                if not ya_se_imprimio_diagnostico:
+                    imprimir_diagnostico_bloqueo(respuesta)
+                    ya_se_imprimio_diagnostico = True
                 continue
 
             datos = extraer_bloque_next_data(respuesta.text)
@@ -383,6 +416,7 @@ def buscar_ofertas_ripley():
 def buscar_ofertas_easy():
     print("🔍 Buscando ofertas en Easy...", flush=True)
     productos_por_link = {}
+    ya_se_imprimio_diagnostico = False
 
     for categoria in CLUSTERS_OFERTAS_EASY:
         try:
@@ -390,6 +424,9 @@ def buscar_ofertas_easy():
 
             if respuesta.status_code != 200:
                 print(f"   ⚠️ No pude acceder a {categoria}. Código: {respuesta.status_code}", flush=True)
+                if not ya_se_imprimio_diagnostico:
+                    imprimir_diagnostico_bloqueo(respuesta)
+                    ya_se_imprimio_diagnostico = True
                 continue
 
             datos = extraer_bloque_next_data(respuesta.text)
