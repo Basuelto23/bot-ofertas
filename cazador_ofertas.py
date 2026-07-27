@@ -4,7 +4,7 @@
 #
 # MODOS DE EJECUCIÓN (se elige al correr el script):
 #   python cazador_ofertas.py nube   -> solo Falabella y DBS (para GitHub Actions)
-#   python cazador_ofertas.py local  -> solo Paris, Ripley y Easy (para tu PC)
+#   python cazador_ofertas.py local  -> solo Paris, Ripley y Easy (para el celular/PC)
 #   python cazador_ofertas.py todas  -> las 5 tiendas (solo para pruebas)
 # Si no le pasas nada, usa "todas".
 
@@ -34,7 +34,7 @@ if MODO not in ("nube", "local", "todas"):
 # ---------------------------------------------------------------------
 # CREDENCIALES DE TELEGRAM
 # ---------------------------------------------------------------------
-# Intentamos usar config.py (para cuando corres el bot en tu compu).
+# Intentamos usar config.py (para cuando corres el bot en tu compu/celu).
 # Si no existe (por ejemplo, cuando corre en GitHub Actions), buscamos
 # la informacion en variables de entorno, que es donde GitHub guarda
 # los "Secrets" de forma segura.
@@ -100,7 +100,7 @@ DESCUENTO_MINIMO_PREMIUM = 50   # 50% o más -> canal premium
 
 # Cada modo usa su propio "cuaderno de memoria" para no chocar:
 # - nube: el de siempre, que vive en GitHub y el workflow actualiza solo
-# - local (y todas): uno nuevo que se queda solo en tu PC
+# - local (y todas): uno que se queda solo en el celular/PC
 if MODO == "nube":
     ARCHIVO_HISTORIAL = "historial_ofertas.json"
 else:
@@ -178,15 +178,25 @@ def extraer_bloque_next_data(html):
     Busca el bloque <script id="__NEXT_DATA__"> dentro de un HTML,
     y devuelve el JSON ya interpretado. Lo usan Ripley y Easy, que
     comparten esta misma forma de guardar los datos de productos.
+
+    ACTUALIZADO: antes buscábamos la etiqueta escrita EXACTAMENTE como
+    <script id="__NEXT_DATA__", pero Ripley empezó a escribirle otros
+    atributos antes del id (ej: <script data-next-head="" id="...">) y
+    la búsqueda exacta dejó de encontrarla. Ahora usamos una búsqueda
+    flexible que la encuentra sin importar el orden de los atributos.
     Devuelve None si no lo encuentra.
     """
-    inicio = html.find('<script id="__NEXT_DATA__"')
-    if inicio == -1:
+    coincidencia = re.search(
+        r'<script[^>]*id="__NEXT_DATA__"[^>]*>(.*?)</script>',
+        html,
+        re.S,
+    )
+    if not coincidencia:
         return None
-    inicio = html.find(">", inicio) + 1
-    fin = html.find("</script>", inicio)
-    bloque_json = html[inicio:fin]
-    return json.loads(bloque_json)
+    try:
+        return json.loads(coincidencia.group(1))
+    except json.JSONDecodeError:
+        return None
 
 
 def imprimir_diagnostico_bloqueo(respuesta):
@@ -248,14 +258,12 @@ def buscar_ofertas_falabella():
         print(f"   ❌ No pude acceder a Falabella. Código: {respuesta.status_code}", flush=True)
         return []
 
-    sopa = BeautifulSoup(respuesta.text, "lxml")
-    tag_datos = sopa.find("script", id="__NEXT_DATA__")
+    datos = extraer_bloque_next_data(respuesta.text)
 
-    if not tag_datos:
+    if not datos:
         print("   ❌ No encontré el bloque de datos de Falabella. La página pudo haber cambiado.", flush=True)
         return []
 
-    datos = json.loads(tag_datos.string)
     resultados_crudos = datos.get("props", {}).get("pageProps", {}).get("results", [])
 
     productos_por_link = {}
@@ -695,7 +703,7 @@ if __name__ == "__main__":
         todos_los_productos += buscar_ofertas_dbs()
         time.sleep(3)
 
-    # Tiendas que solo funcionan desde tu casa (IP residencial)
+    # Tiendas que solo funcionan con IP "de persona" (celular/casa)
     if MODO in ("local", "todas"):
         todos_los_productos += buscar_ofertas_paris()
         time.sleep(3)
