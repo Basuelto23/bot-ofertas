@@ -1,17 +1,18 @@
-# CAZADOR DE OFERTAS: explora varias tiendas (Falabella, Paris, Easy, DBS),
+# CAZADOR DE OFERTAS: explora varias tiendas (Falabella, DBS, Paris, Easy),
 # encuentra productos con descuento, evita duplicados, y publica cada uno en
 # el canal correcto (gratis o premium) según qué tan buena sea la oferta.
 #
-# MODOS DE EJECUCIÓN (se elige al correr el script):
-#   python cazador_ofertas.py nube   -> solo Falabella y DBS (para GitHub Actions)
-#   python cazador_ofertas.py local  -> solo Paris y Easy (para el celular/PC)
-#   python cazador_ofertas.py todas  -> todas las tiendas activas (solo para pruebas)
-# Si no le pasas nada, usa "todas".
+# MODOS DE EJECUCIÓN:
+#   python cazador_ofertas.py local  -> TODAS las tiendas activas (celular)
+#   python cazador_ofertas.py nube   -> nada por ahora (la nube quedó sin tiendas)
+#   python cazador_ofertas.py todas  -> igual que local
 #
-# NOTA: Ripley está PAUSADO. Su página dejó de incluir el bloque de datos
-# (__NEXT_DATA__) que usábamos para leer los productos; ahora los arma con
-# JavaScript en el navegador, cosa que requests no puede ejecutar. El código
-# del lector queda guardado abajo por si algún día vuelve a funcionar.
+# NOTAS DE ESTADO (27-07-2026):
+# - Todas las tiendas activas corren en modo LOCAL (celular con Termux).
+# - Ripley: PAUSADO. Su página dejó de incluir el bloque de datos legible.
+# - Falabella: solo entrega datos a IPs "de persona" (celular/casa), por eso
+#   se movió del modo nube al modo local.
+# - La nube (GitHub Actions) quedó sin tiendas; el workflow se puede desactivar.
 
 import requests
 import json
@@ -52,7 +53,6 @@ except ImportError:
 # ---------------------------------------------------------------------
 # CONFIGURACIÓN GENERAL
 # ---------------------------------------------------------------------
-# Falabella: recorremos varias páginas de la colección de ofertas.
 URL_OFERTAS_FALABELLA = "https://www.falabella.com/falabella-cl/collection/ofertas"
 MAX_PAGINAS_FALABELLA = 5
 
@@ -67,8 +67,7 @@ CATEGORIAS_RIPLEY = [
     "https://simple.ripley.cl/outlet/moda",
 ]
 
-# Categorias de Easy con ofertas reales.
-# (Se eliminó el cluster 4343: daba error 404, esa categoría ya no existe.)
+# Categorias de Easy con ofertas reales (cluster 4343 eliminado: daba 404)
 CLUSTERS_OFERTAS_EASY = [
     "https://www.easy.cl/cluster/7930",
     "https://www.easy.cl/cluster/7952",
@@ -100,7 +99,7 @@ PAGINAS_DBS = [
 DESCUENTO_MINIMO_GRATIS = 30    # 30% a 49% -> canal gratis
 DESCUENTO_MINIMO_PREMIUM = 50   # 50% o más -> canal premium
 
-# Cada modo usa su propio "cuaderno de memoria" para no chocar
+# Cada modo usa su propio "cuaderno de memoria"
 if MODO == "nube":
     ARCHIVO_HISTORIAL = "historial_ofertas.json"
 else:
@@ -150,11 +149,9 @@ def formatear_precio(numero):
 
 def pedir_pagina(url):
     """
-    Pide una página web con reintentos automáticos. Si falla por algo
-    pasajero, espera un poco y vuelve a intentar, hasta 3 veces.
+    Pide una página web con reintentos automáticos (hasta 3).
     Si la tienda nos BLOQUEA (403) o la página no existe (404), no
-    reintenta, porque insistir al tiro no cambia nada.
-    Devuelve la respuesta, o None si nunca hubo respuesta.
+    reintenta. Devuelve la respuesta, o None si nunca hubo respuesta.
     """
     ultima_respuesta = None
     for intento in range(1, 4):
@@ -168,16 +165,14 @@ def pedir_pagina(url):
             print(f"   ⚠️ Intento {intento}: respondió código {respuesta.status_code}, reintentando...", flush=True)
         except requests.RequestException as error:
             print(f"   ⚠️ Intento {intento}: problema de conexión ({error}), reintentando...", flush=True)
-        time.sleep(5 * intento)  # espera 5s, luego 10s, luego 15s
+        time.sleep(5 * intento)
     return ultima_respuesta
 
 
 def extraer_bloque_next_data(html):
     """
-    Busca el bloque <script id="__NEXT_DATA__"> dentro de un HTML y
-    devuelve el JSON ya interpretado (búsqueda flexible, sin importar
-    el orden de los atributos de la etiqueta).
-    Devuelve None si no lo encuentra o si el contenido está corrupto.
+    Busca el bloque <script id="__NEXT_DATA__"> (búsqueda flexible) y
+    devuelve el JSON interpretado, o None si no está o está corrupto.
     """
     coincidencia = re.search(
         r'<script[^>]*id="__NEXT_DATA__"[^>]*>(.*?)</script>',
@@ -194,19 +189,13 @@ def extraer_bloque_next_data(html):
 
 
 def imprimir_pistas_pagina(html):
-    """
-    Cuando una página respondió OK pero no logramos sacarle los datos,
-    imprime pistas para entender qué nos mandó realmente la tienda.
-    """
+    """Pistas cuando una página respondió OK pero sin datos legibles."""
     print(f"   🔬 Pistas: la página mide {len(html)} caracteres.", flush=True)
     print(f"   🔬 Pistas: ¿contiene __NEXT_DATA__? -> {'__NEXT_DATA__' in html}", flush=True)
 
 
 def imprimir_diagnostico_bloqueo(respuesta):
-    """
-    Cuando una tienda nos rechaza, imprime las cabeceras que ELLOS nos
-    mandaron de vuelta, buscando pistas del sistema anti-bot que usan.
-    """
+    """Pistas del sistema anti-bot cuando una tienda nos rechaza."""
     pistas_conocidas = ["cf-ray", "cf-mitigated", "server", "x-akamai-transformed",
                          "x-akamai-request-id", "x-px-block", "x-datadome", "via"]
     headers_relevantes = {
@@ -631,6 +620,10 @@ def buscar_ofertas_dbs():
             sopa = BeautifulSoup(respuesta.text, "lxml")
             tarjetas = sopa.find_all("li", class_=lambda c: c and "product-item" in c)
 
+            if not tarjetas:
+                print(f"   ⚠️ {url_pagina} respondió OK pero sin tarjetas de producto.", flush=True)
+                imprimir_pistas_pagina(respuesta.text)
+
             for tarjeta in tarjetas:
                 producto = procesar_tarjeta_dbs(tarjeta)
                 if producto:
@@ -651,11 +644,9 @@ def buscar_ofertas_dbs():
 # ---------------------------------------------------------------------
 def enviar_alerta_telegram(datos, chat_id, es_premium):
     """
-    Envía la alerta a Telegram. Si la conexión falla (se cortó el wifi,
-    el celular cambió de red, etc.), reintenta hasta 3 veces con esperas.
-    Si aún así no se puede, devuelve False y el programa sigue con el
-    resto de las ofertas en vez de morirse.
-    Devuelve True si el mensaje se envió, False si no.
+    Envía la alerta a Telegram con hasta 3 reintentos si la conexión
+    falla. Devuelve True si se envió, False si no (y el programa sigue
+    con las demás ofertas en vez de morirse).
     """
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
 
@@ -686,7 +677,6 @@ def enviar_alerta_telegram(datos, chat_id, es_premium):
                 print(f"   ✅ Enviado a canal {'PREMIUM' if es_premium else 'GRATIS'}", flush=True)
                 return True
 
-            # Telegram a veces pide esperar si mandamos muy rápido (código 429)
             if respuesta.status_code == 429:
                 print(f"   ⏳ Telegram pide calma, esperando antes de reintentar...", flush=True)
                 time.sleep(10 * intento)
@@ -742,19 +732,19 @@ if __name__ == "__main__":
 
     todos_los_productos = []
 
-    # Tiendas que funcionan desde GitHub Actions (la nube)
-    if MODO in ("nube", "todas"):
+    # Todas las tiendas activas corren en modo local (celular).
+    # La nube quedó sin tiendas asignadas por ahora.
+    if MODO in ("local", "todas"):
         todos_los_productos += buscar_ofertas_falabella()
         time.sleep(3)
         todos_los_productos += buscar_ofertas_dbs()
         time.sleep(3)
-
-    # Tiendas que solo funcionan con IP "de persona" (celular/casa)
-    # (Ripley pausado: su página ya no trae los datos que podíamos leer)
-    if MODO in ("local", "todas"):
         todos_los_productos += buscar_ofertas_paris()
         time.sleep(3)
         todos_los_productos += buscar_ofertas_easy()
+
+    if MODO == "nube":
+        print("ℹ️ El modo nube no tiene tiendas asignadas actualmente.", flush=True)
 
     print(f"\n📦 Total combinado: {len(todos_los_productos)} producto(s).\n", flush=True)
 
