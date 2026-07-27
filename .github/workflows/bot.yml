@@ -25,7 +25,7 @@ jobs:
           TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
           TELEGRAM_CHAT_ID_GRATIS: ${{ secrets.TELEGRAM_CHAT_ID_GRATIS }}
           TELEGRAM_CHAT_ID_PREMIUM: ${{ secrets.TELEGRAM_CHAT_ID_PREMIUM }}
-        run: python cazador_ofertas.py
+        run: python cazador_ofertas.py nube
 
       - name: Guardar el historial actualizado de vuelta en GitHub
         run: |
