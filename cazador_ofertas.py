@@ -1,12 +1,17 @@
-# CAZADOR DE OFERTAS: explora varias tiendas (Falabella, Paris, Ripley, Easy, DBS),
+# CAZADOR DE OFERTAS: explora varias tiendas (Falabella, Paris, Easy, DBS),
 # encuentra productos con descuento, evita duplicados, y publica cada uno en
 # el canal correcto (gratis o premium) según qué tan buena sea la oferta.
 #
 # MODOS DE EJECUCIÓN (se elige al correr el script):
 #   python cazador_ofertas.py nube   -> solo Falabella y DBS (para GitHub Actions)
-#   python cazador_ofertas.py local  -> solo Paris, Ripley y Easy (para el celular/PC)
-#   python cazador_ofertas.py todas  -> las 5 tiendas (solo para pruebas)
+#   python cazador_ofertas.py local  -> solo Paris y Easy (para el celular/PC)
+#   python cazador_ofertas.py todas  -> todas las tiendas activas (solo para pruebas)
 # Si no le pasas nada, usa "todas".
+#
+# NOTA: Ripley está PAUSADO. Su página dejó de incluir el bloque de datos
+# (__NEXT_DATA__) que usábamos para leer los productos; ahora los arma con
+# JavaScript en el navegador, cosa que requests no puede ejecutar. El código
+# del lector queda guardado abajo por si algún día vuelve a funcionar.
 
 import requests
 import json
@@ -47,15 +52,14 @@ except ImportError:
 # ---------------------------------------------------------------------
 # CONFIGURACIÓN GENERAL
 # ---------------------------------------------------------------------
-# Falabella: ahora recorremos VARIAS páginas de la colección de ofertas.
-# La página 1 es la de siempre; las siguientes se piden con ?page=2, 3...
+# Falabella: recorremos varias páginas de la colección de ofertas.
 URL_OFERTAS_FALABELLA = "https://www.falabella.com/falabella-cl/collection/ofertas"
 MAX_PAGINAS_FALABELLA = 5
 
 URL_OFERTAS_PARIS = "https://www.paris.cl/mujer/ofertas/"
 DOMINIO_PARIS = "https://www.paris.cl"
 
-# Las 4 categorias de "outlet" de Ripley donde estan las ofertas
+# Las categorias "outlet" de Ripley (PAUSADO, ver nota de arriba)
 CATEGORIAS_RIPLEY = [
     "https://simple.ripley.cl/outlet/calzado",
     "https://simple.ripley.cl/outlet/decohogar",
@@ -63,7 +67,8 @@ CATEGORIAS_RIPLEY = [
     "https://simple.ripley.cl/outlet/moda",
 ]
 
-# Las 18 categorias de Easy que confirmamos que son de ofertas reales
+# Categorias de Easy con ofertas reales.
+# (Se eliminó el cluster 4343: daba error 404, esa categoría ya no existe.)
 CLUSTERS_OFERTAS_EASY = [
     "https://www.easy.cl/cluster/7930",
     "https://www.easy.cl/cluster/7952",
@@ -75,7 +80,6 @@ CLUSTERS_OFERTAS_EASY = [
     "https://www.easy.cl/cluster/6286",
     "https://www.easy.cl/cluster/5360",
     "https://www.easy.cl/cluster/7054",
-    "https://www.easy.cl/cluster/4343",
     "https://www.easy.cl/cluster/8084",
     "https://www.easy.cl/cluster/5267",
     "https://www.easy.cl/cluster/6826",
@@ -171,11 +175,8 @@ def pedir_pagina(url):
 def extraer_bloque_next_data(html):
     """
     Busca el bloque <script id="__NEXT_DATA__"> dentro de un HTML y
-    devuelve el JSON ya interpretado. Lo usan Falabella, Ripley y Easy.
-
-    Búsqueda FLEXIBLE: encuentra la etiqueta sin importar el orden de
-    sus atributos (Ripley empezó a escribirle atributos extra antes
-    del id, y la búsqueda exacta antigua dejó de encontrarla).
+    devuelve el JSON ya interpretado (búsqueda flexible, sin importar
+    el orden de los atributos de la etiqueta).
     Devuelve None si no lo encuentra o si el contenido está corrupto.
     """
     coincidencia = re.search(
@@ -195,8 +196,7 @@ def extraer_bloque_next_data(html):
 def imprimir_pistas_pagina(html):
     """
     Cuando una página respondió OK pero no logramos sacarle los datos,
-    esto imprime pistas para entender qué nos mandó realmente la tienda:
-    el tamaño de la página y si el bloque de datos existe o no.
+    imprime pistas para entender qué nos mandó realmente la tienda.
     """
     print(f"   🔬 Pistas: la página mide {len(html)} caracteres.", flush=True)
     print(f"   🔬 Pistas: ¿contiene __NEXT_DATA__? -> {'__NEXT_DATA__' in html}", flush=True)
@@ -214,7 +214,6 @@ def imprimir_diagnostico_bloqueo(respuesta):
         if clave.lower() in pistas_conocidas
     }
     print(f"   🔬 Diagnóstico - Headers relevantes: {headers_relevantes}", flush=True)
-    print(f"   🔬 Diagnóstico - Todos los headers: {dict(respuesta.headers)}", flush=True)
 
 
 # ---------------------------------------------------------------------
@@ -233,7 +232,7 @@ def guardar_historial(historial):
 
 
 # ---------------------------------------------------------------------
-# LECTOR: FALABELLA (ahora con varias páginas)
+# LECTOR: FALABELLA (varias páginas)
 # ---------------------------------------------------------------------
 def extraer_precio_falabella(producto, tipo_buscado):
     for paquete_precio in producto.get("prices", []):
@@ -249,7 +248,6 @@ def buscar_ofertas_falabella():
     productos_por_link = {}
 
     for numero_pagina in range(1, MAX_PAGINAS_FALABELLA + 1):
-        # La página 1 es la URL normal; las siguientes llevan ?page=N
         if numero_pagina == 1:
             url = URL_OFERTAS_FALABELLA
         else:
@@ -305,8 +303,6 @@ def buscar_ofertas_falabella():
 
         print(f"   📄 Página {numero_pagina}: {nuevos_en_esta_pagina} producto(s) nuevo(s).", flush=True)
 
-        # Si esta página no aportó nada nuevo, las siguientes tampoco lo
-        # harán (o no existen), así que paramos para no perder tiempo.
         if nuevos_en_esta_pagina == 0:
             break
 
@@ -403,13 +399,9 @@ def buscar_ofertas_paris():
 
 
 # ---------------------------------------------------------------------
-# LECTOR: RIPLEY
+# LECTOR: RIPLEY (PAUSADO - no se llama desde el programa principal)
 # ---------------------------------------------------------------------
 def armar_slug_ripley(texto):
-    """
-    Convierte un nombre de producto en el formato que usa Ripley
-    para armar sus links (minusculas, sin tildes, con guiones).
-    """
     texto = texto.lower()
     texto = unicodedata.normalize("NFKD", texto)
     texto = texto.encode("ascii", "ignore").decode("utf-8")
@@ -455,7 +447,7 @@ def buscar_ofertas_ripley():
             )
 
             if not productos_crudos:
-                print(f"   ⚠️ El bloque de datos de {categoria} venía sin productos (¿cambió el mapa interno?).", flush=True)
+                print(f"   ⚠️ El bloque de datos de {categoria} venía sin productos.", flush=True)
                 continue
 
             for producto in productos_crudos:
@@ -655,9 +647,16 @@ def buscar_ofertas_dbs():
 
 
 # ---------------------------------------------------------------------
-# ENVÍO A TELEGRAM
+# ENVÍO A TELEGRAM (blindado contra cortes de conexión)
 # ---------------------------------------------------------------------
 def enviar_alerta_telegram(datos, chat_id, es_premium):
+    """
+    Envía la alerta a Telegram. Si la conexión falla (se cortó el wifi,
+    el celular cambió de red, etc.), reintenta hasta 3 veces con esperas.
+    Si aún así no se puede, devuelve False y el programa sigue con el
+    resto de las ofertas en vez de morirse.
+    Devuelve True si el mensaje se envió, False si no.
+    """
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
 
     etiqueta = "💎 <b>OFERTA PREMIUM</b> 💎" if es_premium else "🔥 <b>¡OFERTA!</b> 🔥"
@@ -679,12 +678,29 @@ def enviar_alerta_telegram(datos, chat_id, es_premium):
         "disable_web_page_preview": False
     }
 
-    respuesta = requests.post(url, data=datos_envio)
+    for intento in range(1, 4):
+        try:
+            respuesta = requests.post(url, data=datos_envio, timeout=15)
 
-    if respuesta.status_code == 200:
-        print(f"   ✅ Enviado a canal {'PREMIUM' if es_premium else 'GRATIS'}", flush=True)
-    else:
-        print(f"   ❌ Falló el envío. Código: {respuesta.status_code} - {respuesta.text}", flush=True)
+            if respuesta.status_code == 200:
+                print(f"   ✅ Enviado a canal {'PREMIUM' if es_premium else 'GRATIS'}", flush=True)
+                return True
+
+            # Telegram a veces pide esperar si mandamos muy rápido (código 429)
+            if respuesta.status_code == 429:
+                print(f"   ⏳ Telegram pide calma, esperando antes de reintentar...", flush=True)
+                time.sleep(10 * intento)
+                continue
+
+            print(f"   ❌ Falló el envío. Código: {respuesta.status_code} - {respuesta.text}", flush=True)
+            return False
+
+        except requests.RequestException as error:
+            print(f"   ⚠️ Intento {intento} de envío falló por conexión, reintentando...", flush=True)
+            time.sleep(5 * intento)
+
+    print(f"   ❌ No pude enviar esta oferta tras 3 intentos. Saldrá en la próxima corrida.", flush=True)
+    return False
 
 
 # ---------------------------------------------------------------------
@@ -704,14 +720,16 @@ def procesar_producto(producto, historial):
 
     if registro_anterior is None:
         print(f"🆕 Nuevo [{producto['tienda']}]: {producto['titulo']} ({descuento}%)", flush=True)
-        enviar_alerta_telegram(producto, chat_id, es_premium)
-        historial[link] = {"precio_oferta": producto["precio_oferta"], "canal": "premium" if es_premium else "gratis"}
+        se_envio = enviar_alerta_telegram(producto, chat_id, es_premium)
+        if se_envio:
+            historial[link] = {"precio_oferta": producto["precio_oferta"], "canal": "premium" if es_premium else "gratis"}
         time.sleep(SEGUNDOS_ENTRE_MENSAJES)
 
     elif producto["precio_oferta"] < registro_anterior["precio_oferta"]:
         print(f"📉 Bajó más [{producto['tienda']}]: {producto['titulo']} ({descuento}%)", flush=True)
-        enviar_alerta_telegram(producto, chat_id, es_premium)
-        historial[link] = {"precio_oferta": producto["precio_oferta"], "canal": "premium" if es_premium else "gratis"}
+        se_envio = enviar_alerta_telegram(producto, chat_id, es_premium)
+        if se_envio:
+            historial[link] = {"precio_oferta": producto["precio_oferta"], "canal": "premium" if es_premium else "gratis"}
         time.sleep(SEGUNDOS_ENTRE_MENSAJES)
 
     return historial
@@ -732,10 +750,9 @@ if __name__ == "__main__":
         time.sleep(3)
 
     # Tiendas que solo funcionan con IP "de persona" (celular/casa)
+    # (Ripley pausado: su página ya no trae los datos que podíamos leer)
     if MODO in ("local", "todas"):
         todos_los_productos += buscar_ofertas_paris()
-        time.sleep(3)
-        todos_los_productos += buscar_ofertas_ripley()
         time.sleep(3)
         todos_los_productos += buscar_ofertas_easy()
 
