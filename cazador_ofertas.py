@@ -1,6 +1,12 @@
 # CAZADOR DE OFERTAS: explora varias tiendas (Falabella, Paris, Ripley, Easy, DBS),
 # encuentra productos con descuento, evita duplicados, y publica cada uno en
 # el canal correcto (gratis o premium) según qué tan buena sea la oferta.
+#
+# MODOS DE EJECUCIÓN (se elige al correr el script):
+#   python cazador_ofertas.py nube   -> solo Falabella y DBS (para GitHub Actions)
+#   python cazador_ofertas.py local  -> solo Paris, Ripley y Easy (para tu PC)
+#   python cazador_ofertas.py todas  -> las 5 tiendas (solo para pruebas)
+# Si no le pasas nada, usa "todas".
 
 import requests
 import json
@@ -13,6 +19,17 @@ from bs4 import BeautifulSoup
 
 import sys
 sys.stdout.reconfigure(encoding="utf-8")
+
+# ---------------------------------------------------------------------
+# MODO DE EJECUCIÓN
+# ---------------------------------------------------------------------
+# sys.argv es la lista de "palabras" con que se llamó al script.
+# Ejemplo: "python cazador_ofertas.py local" -> sys.argv[1] es "local".
+MODO = sys.argv[1].lower() if len(sys.argv) > 1 else "todas"
+
+if MODO not in ("nube", "local", "todas"):
+    print(f"⚠️ El modo '{MODO}' no existe. Opciones: nube, local, todas. Usaré 'todas'.", flush=True)
+    MODO = "todas"
 
 # ---------------------------------------------------------------------
 # CREDENCIALES DE TELEGRAM
@@ -81,15 +98,17 @@ PAGINAS_DBS = [
 DESCUENTO_MINIMO_GRATIS = 30    # 30% a 49% -> canal gratis
 DESCUENTO_MINIMO_PREMIUM = 50   # 50% o más -> canal premium
 
-ARCHIVO_HISTORIAL = "historial_ofertas.json"
+# Cada modo usa su propio "cuaderno de memoria" para no chocar:
+# - nube: el de siempre, que vive en GitHub y el workflow actualiza solo
+# - local (y todas): uno nuevo que se queda solo en tu PC
+if MODO == "nube":
+    ARCHIVO_HISTORIAL = "historial_ofertas.json"
+else:
+    ARCHIVO_HISTORIAL = "historial_local.json"
+
 SEGUNDOS_ENTRE_MENSAJES = 2.5
 
-# Headers "de navegador real" (Chrome en Windows). Se agregaron las
-# cabeceras sec-ch-ua, que un Chrome real manda automaticamente y que
-# algunos sitios con proteccion anti-bot revisan para detectar robots.
-# Tambien se saco el "Referer" de Google y se cambio Sec-Fetch-Site a
-# "none", para simular que entramos escribiendo la URL directo (que es
-# mas realista para un robot que "visitar desde Google" sin serlo).
+# Headers "de navegador real" (Chrome en Windows).
 CABECERAS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36",
     "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7",
@@ -127,6 +146,31 @@ def reparar_texto(texto):
 
 def formatear_precio(numero):
     return f"{numero:,}".replace(",", ".")
+
+
+def pedir_pagina(url):
+    """
+    Pide una página web con reintentos automáticos. Si falla por algo
+    pasajero (se cortó la conexión, el sitio respondió con un error
+    temporal), espera un poco y vuelve a intentar, hasta 3 veces.
+    Si la tienda nos BLOQUEA (código 403) o la página no existe (404),
+    no reintenta, porque insistir al tiro no cambia nada.
+    Devuelve la respuesta, o None si nunca hubo respuesta.
+    """
+    ultima_respuesta = None
+    for intento in range(1, 4):
+        try:
+            respuesta = requests.get(url, headers=CABECERAS, timeout=15)
+            ultima_respuesta = respuesta
+            if respuesta.status_code == 200:
+                return respuesta
+            if respuesta.status_code in (403, 404):
+                return respuesta
+            print(f"   ⚠️ Intento {intento}: respondió código {respuesta.status_code}, reintentando...", flush=True)
+        except requests.RequestException as error:
+            print(f"   ⚠️ Intento {intento}: problema de conexión ({error}), reintentando...", flush=True)
+        time.sleep(5 * intento)  # espera 5s, luego 10s, luego 15s
+    return ultima_respuesta
 
 
 def extraer_bloque_next_data(html):
@@ -192,8 +236,12 @@ def extraer_precio_falabella(producto, tipo_buscado):
 
 def buscar_ofertas_falabella():
     print("🔍 Buscando ofertas en Falabella...", flush=True)
-    sesion = requests.Session()
-    respuesta = sesion.get(URL_OFERTAS_FALABELLA, headers=CABECERAS, timeout=15)
+    respuesta = pedir_pagina(URL_OFERTAS_FALABELLA)
+
+    if respuesta is None:
+        print("   ❌ No pude conectarme a Falabella después de varios intentos.", flush=True)
+        return []
+
     respuesta.encoding = "utf-8"
 
     if respuesta.status_code != 200:
@@ -252,8 +300,12 @@ def limpiar_precio_paris(texto):
 
 def buscar_ofertas_paris():
     print("🔍 Buscando ofertas en Paris...", flush=True)
-    sesion = requests.Session()
-    respuesta = sesion.get(URL_OFERTAS_PARIS, headers=CABECERAS, timeout=15)
+    respuesta = pedir_pagina(URL_OFERTAS_PARIS)
+
+    if respuesta is None:
+        print("   ❌ No pude conectarme a Paris después de varios intentos.", flush=True)
+        return []
+
     respuesta.encoding = "utf-8"
 
     if respuesta.status_code != 200:
@@ -347,7 +399,11 @@ def buscar_ofertas_ripley():
 
     for categoria in CATEGORIAS_RIPLEY:
         try:
-            respuesta = requests.get(categoria, headers=CABECERAS, timeout=15)
+            respuesta = pedir_pagina(categoria)
+
+            if respuesta is None:
+                print(f"   ⚠️ No pude conectarme a {categoria} después de varios intentos.", flush=True)
+                continue
 
             if respuesta.status_code != 200:
                 print(f"   ⚠️ No pude acceder a {categoria}. Código: {respuesta.status_code}", flush=True)
@@ -420,7 +476,11 @@ def buscar_ofertas_easy():
 
     for categoria in CLUSTERS_OFERTAS_EASY:
         try:
-            respuesta = requests.get(categoria, headers=CABECERAS, timeout=15)
+            respuesta = pedir_pagina(categoria)
+
+            if respuesta is None:
+                print(f"   ⚠️ No pude conectarme a {categoria} después de varios intentos.", flush=True)
+                continue
 
             if respuesta.status_code != 200:
                 print(f"   ⚠️ No pude acceder a {categoria}. Código: {respuesta.status_code}", flush=True)
@@ -530,7 +590,11 @@ def buscar_ofertas_dbs():
 
     for url_pagina in PAGINAS_DBS:
         try:
-            respuesta = requests.get(url_pagina, headers=CABECERAS, timeout=15)
+            respuesta = pedir_pagina(url_pagina)
+
+            if respuesta is None:
+                print(f"   ⚠️ No pude conectarme a {url_pagina} después de varios intentos.", flush=True)
+                continue
 
             if respuesta.status_code != 200:
                 print(f"   ⚠️ No pude acceder a {url_pagina}. Código: {respuesta.status_code}", flush=True)
@@ -619,20 +683,25 @@ def procesar_producto(producto, historial):
 
 if __name__ == "__main__":
     print("=" * 50, flush=True)
+    print(f"🤖 Modo de ejecución: {MODO.upper()}", flush=True)
+    print(f"🗂️ Cuaderno de memoria: {ARCHIVO_HISTORIAL}", flush=True)
+
     todos_los_productos = []
-    todos_los_productos += buscar_ofertas_falabella()
 
-    time.sleep(3)
-    todos_los_productos += buscar_ofertas_paris()
+    # Tiendas que funcionan desde GitHub Actions (la nube)
+    if MODO in ("nube", "todas"):
+        todos_los_productos += buscar_ofertas_falabella()
+        time.sleep(3)
+        todos_los_productos += buscar_ofertas_dbs()
+        time.sleep(3)
 
-    time.sleep(3)
-    todos_los_productos += buscar_ofertas_ripley()
-
-    time.sleep(3)
-    todos_los_productos += buscar_ofertas_easy()
-
-    time.sleep(3)
-    todos_los_productos += buscar_ofertas_dbs()
+    # Tiendas que solo funcionan desde tu casa (IP residencial)
+    if MODO in ("local", "todas"):
+        todos_los_productos += buscar_ofertas_paris()
+        time.sleep(3)
+        todos_los_productos += buscar_ofertas_ripley()
+        time.sleep(3)
+        todos_los_productos += buscar_ofertas_easy()
 
     print(f"\n📦 Total combinado: {len(todos_los_productos)} producto(s).\n", flush=True)
 
