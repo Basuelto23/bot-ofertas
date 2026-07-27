@@ -23,8 +23,6 @@ sys.stdout.reconfigure(encoding="utf-8")
 # ---------------------------------------------------------------------
 # MODO DE EJECUCIÓN
 # ---------------------------------------------------------------------
-# sys.argv es la lista de "palabras" con que se llamó al script.
-# Ejemplo: "python cazador_ofertas.py local" -> sys.argv[1] es "local".
 MODO = sys.argv[1].lower() if len(sys.argv) > 1 else "todas"
 
 if MODO not in ("nube", "local", "todas"):
@@ -34,10 +32,6 @@ if MODO not in ("nube", "local", "todas"):
 # ---------------------------------------------------------------------
 # CREDENCIALES DE TELEGRAM
 # ---------------------------------------------------------------------
-# Intentamos usar config.py (para cuando corres el bot en tu compu/celu).
-# Si no existe (por ejemplo, cuando corre en GitHub Actions), buscamos
-# la informacion en variables de entorno, que es donde GitHub guarda
-# los "Secrets" de forma segura.
 try:
     import config
     TELEGRAM_TOKEN = config.TELEGRAM_TOKEN
@@ -53,7 +47,11 @@ except ImportError:
 # ---------------------------------------------------------------------
 # CONFIGURACIÓN GENERAL
 # ---------------------------------------------------------------------
+# Falabella: ahora recorremos VARIAS páginas de la colección de ofertas.
+# La página 1 es la de siempre; las siguientes se piden con ?page=2, 3...
 URL_OFERTAS_FALABELLA = "https://www.falabella.com/falabella-cl/collection/ofertas"
+MAX_PAGINAS_FALABELLA = 5
+
 URL_OFERTAS_PARIS = "https://www.paris.cl/mujer/ofertas/"
 DOMINIO_PARIS = "https://www.paris.cl"
 
@@ -98,9 +96,7 @@ PAGINAS_DBS = [
 DESCUENTO_MINIMO_GRATIS = 30    # 30% a 49% -> canal gratis
 DESCUENTO_MINIMO_PREMIUM = 50   # 50% o más -> canal premium
 
-# Cada modo usa su propio "cuaderno de memoria" para no chocar:
-# - nube: el de siempre, que vive en GitHub y el workflow actualiza solo
-# - local (y todas): uno que se queda solo en el celular/PC
+# Cada modo usa su propio "cuaderno de memoria" para no chocar
 if MODO == "nube":
     ARCHIVO_HISTORIAL = "historial_ofertas.json"
 else:
@@ -151,10 +147,9 @@ def formatear_precio(numero):
 def pedir_pagina(url):
     """
     Pide una página web con reintentos automáticos. Si falla por algo
-    pasajero (se cortó la conexión, el sitio respondió con un error
-    temporal), espera un poco y vuelve a intentar, hasta 3 veces.
-    Si la tienda nos BLOQUEA (código 403) o la página no existe (404),
-    no reintenta, porque insistir al tiro no cambia nada.
+    pasajero, espera un poco y vuelve a intentar, hasta 3 veces.
+    Si la tienda nos BLOQUEA (403) o la página no existe (404), no
+    reintenta, porque insistir al tiro no cambia nada.
     Devuelve la respuesta, o None si nunca hubo respuesta.
     """
     ultima_respuesta = None
@@ -175,16 +170,13 @@ def pedir_pagina(url):
 
 def extraer_bloque_next_data(html):
     """
-    Busca el bloque <script id="__NEXT_DATA__"> dentro de un HTML,
-    y devuelve el JSON ya interpretado. Lo usan Ripley y Easy, que
-    comparten esta misma forma de guardar los datos de productos.
+    Busca el bloque <script id="__NEXT_DATA__"> dentro de un HTML y
+    devuelve el JSON ya interpretado. Lo usan Falabella, Ripley y Easy.
 
-    ACTUALIZADO: antes buscábamos la etiqueta escrita EXACTAMENTE como
-    <script id="__NEXT_DATA__", pero Ripley empezó a escribirle otros
-    atributos antes del id (ej: <script data-next-head="" id="...">) y
-    la búsqueda exacta dejó de encontrarla. Ahora usamos una búsqueda
-    flexible que la encuentra sin importar el orden de los atributos.
-    Devuelve None si no lo encuentra.
+    Búsqueda FLEXIBLE: encuentra la etiqueta sin importar el orden de
+    sus atributos (Ripley empezó a escribirle atributos extra antes
+    del id, y la búsqueda exacta antigua dejó de encontrarla).
+    Devuelve None si no lo encuentra o si el contenido está corrupto.
     """
     coincidencia = re.search(
         r'<script[^>]*id="__NEXT_DATA__"[^>]*>(.*?)</script>',
@@ -195,17 +187,25 @@ def extraer_bloque_next_data(html):
         return None
     try:
         return json.loads(coincidencia.group(1))
-    except json.JSONDecodeError:
+    except json.JSONDecodeError as error:
+        print(f"   ⚠️ Encontré el bloque de datos pero no pude leerlo (JSON roto): {error}", flush=True)
         return None
+
+
+def imprimir_pistas_pagina(html):
+    """
+    Cuando una página respondió OK pero no logramos sacarle los datos,
+    esto imprime pistas para entender qué nos mandó realmente la tienda:
+    el tamaño de la página y si el bloque de datos existe o no.
+    """
+    print(f"   🔬 Pistas: la página mide {len(html)} caracteres.", flush=True)
+    print(f"   🔬 Pistas: ¿contiene __NEXT_DATA__? -> {'__NEXT_DATA__' in html}", flush=True)
 
 
 def imprimir_diagnostico_bloqueo(respuesta):
     """
-    Cuando una tienda nos rechaza, esto imprime las cabeceras que ELLOS
-    nos mandaron de vuelta. Sirve para detectar pistas de que sistema
-    de seguridad anti-bot estan usando (ej: 'cf-ray' es de Cloudflare,
-    'x-akamai...' es de Akamai, etc.), asi sabemos contra que estamos
-    peleando.
+    Cuando una tienda nos rechaza, imprime las cabeceras que ELLOS nos
+    mandaron de vuelta, buscando pistas del sistema anti-bot que usan.
     """
     pistas_conocidas = ["cf-ray", "cf-mitigated", "server", "x-akamai-transformed",
                          "x-akamai-request-id", "x-px-block", "x-datadome", "via"]
@@ -233,7 +233,7 @@ def guardar_historial(historial):
 
 
 # ---------------------------------------------------------------------
-# LECTOR: FALABELLA
+# LECTOR: FALABELLA (ahora con varias páginas)
 # ---------------------------------------------------------------------
 def extraer_precio_falabella(producto, tipo_buscado):
     for paquete_precio in producto.get("prices", []):
@@ -246,53 +246,71 @@ def extraer_precio_falabella(producto, tipo_buscado):
 
 def buscar_ofertas_falabella():
     print("🔍 Buscando ofertas en Falabella...", flush=True)
-    respuesta = pedir_pagina(URL_OFERTAS_FALABELLA)
-
-    if respuesta is None:
-        print("   ❌ No pude conectarme a Falabella después de varios intentos.", flush=True)
-        return []
-
-    respuesta.encoding = "utf-8"
-
-    if respuesta.status_code != 200:
-        print(f"   ❌ No pude acceder a Falabella. Código: {respuesta.status_code}", flush=True)
-        return []
-
-    datos = extraer_bloque_next_data(respuesta.text)
-
-    if not datos:
-        print("   ❌ No encontré el bloque de datos de Falabella. La página pudo haber cambiado.", flush=True)
-        return []
-
-    resultados_crudos = datos.get("props", {}).get("pageProps", {}).get("results", [])
-
     productos_por_link = {}
 
-    for producto in resultados_crudos:
-        titulo = producto.get("displayName")
-        if titulo:
-            titulo = reparar_texto(titulo)
+    for numero_pagina in range(1, MAX_PAGINAS_FALABELLA + 1):
+        # La página 1 es la URL normal; las siguientes llevan ?page=N
+        if numero_pagina == 1:
+            url = URL_OFERTAS_FALABELLA
+        else:
+            url = f"{URL_OFERTAS_FALABELLA}?page={numero_pagina}"
 
-        link = producto.get("url")
-        precio_oferta = extraer_precio_falabella(producto, "internetPrice")
-        precio_normal = extraer_precio_falabella(producto, "normalPrice")
+        respuesta = pedir_pagina(url)
 
-        if not titulo or not link or not precio_oferta or not precio_normal or precio_normal == 0:
-            continue
+        if respuesta is None:
+            print(f"   ⚠️ No pude conectarme a la página {numero_pagina} de Falabella.", flush=True)
+            break
 
-        descuento = round((1 - (precio_oferta / precio_normal)) * 100)
+        respuesta.encoding = "utf-8"
 
-        if link in productos_por_link:
-            continue
+        if respuesta.status_code != 200:
+            print(f"   ⚠️ Página {numero_pagina} de Falabella respondió código {respuesta.status_code}.", flush=True)
+            break
 
-        productos_por_link[link] = {
-            "tienda": "Falabella",
-            "titulo": titulo,
-            "precio_oferta": precio_oferta,
-            "precio_normal": precio_normal,
-            "descuento": descuento,
-            "link": link
-        }
+        datos = extraer_bloque_next_data(respuesta.text)
+        if not datos:
+            print(f"   ⚠️ No encontré el bloque de datos en la página {numero_pagina} de Falabella.", flush=True)
+            imprimir_pistas_pagina(respuesta.text)
+            break
+
+        resultados_crudos = datos.get("props", {}).get("pageProps", {}).get("results", [])
+
+        nuevos_en_esta_pagina = 0
+        for producto in resultados_crudos:
+            titulo = producto.get("displayName")
+            if titulo:
+                titulo = reparar_texto(titulo)
+
+            link = producto.get("url")
+            precio_oferta = extraer_precio_falabella(producto, "internetPrice")
+            precio_normal = extraer_precio_falabella(producto, "normalPrice")
+
+            if not titulo or not link or not precio_oferta or not precio_normal or precio_normal == 0:
+                continue
+
+            if link in productos_por_link:
+                continue
+
+            descuento = round((1 - (precio_oferta / precio_normal)) * 100)
+
+            productos_por_link[link] = {
+                "tienda": "Falabella",
+                "titulo": titulo,
+                "precio_oferta": precio_oferta,
+                "precio_normal": precio_normal,
+                "descuento": descuento,
+                "link": link
+            }
+            nuevos_en_esta_pagina += 1
+
+        print(f"   📄 Página {numero_pagina}: {nuevos_en_esta_pagina} producto(s) nuevo(s).", flush=True)
+
+        # Si esta página no aportó nada nuevo, las siguientes tampoco lo
+        # harán (o no existen), así que paramos para no perder tiempo.
+        if nuevos_en_esta_pagina == 0:
+            break
+
+        time.sleep(random.uniform(2, 4))
 
     print(f"   ✅ {len(productos_por_link)} producto(s) único(s) en Falabella.", flush=True)
     return list(productos_por_link.values())
@@ -403,7 +421,7 @@ def armar_slug_ripley(texto):
 def buscar_ofertas_ripley():
     print("🔍 Buscando ofertas en Ripley...", flush=True)
     productos_por_link = {}
-    ya_se_imprimio_diagnostico = False
+    ya_se_imprimieron_pistas = False
 
     for categoria in CATEGORIAS_RIPLEY:
         try:
@@ -415,14 +433,17 @@ def buscar_ofertas_ripley():
 
             if respuesta.status_code != 200:
                 print(f"   ⚠️ No pude acceder a {categoria}. Código: {respuesta.status_code}", flush=True)
-                if not ya_se_imprimio_diagnostico:
+                if not ya_se_imprimieron_pistas:
                     imprimir_diagnostico_bloqueo(respuesta)
-                    ya_se_imprimio_diagnostico = True
+                    ya_se_imprimieron_pistas = True
                 continue
 
             datos = extraer_bloque_next_data(respuesta.text)
             if not datos:
                 print(f"   ⚠️ No encontré datos en {categoria}", flush=True)
+                if not ya_se_imprimieron_pistas:
+                    imprimir_pistas_pagina(respuesta.text)
+                    ya_se_imprimieron_pistas = True
                 continue
 
             productos_crudos = (
@@ -432,6 +453,10 @@ def buscar_ofertas_ripley():
                 .get("data", {})
                 .get("products", [])
             )
+
+            if not productos_crudos:
+                print(f"   ⚠️ El bloque de datos de {categoria} venía sin productos (¿cambió el mapa interno?).", flush=True)
+                continue
 
             for producto in productos_crudos:
                 titulo = producto.get("name")
@@ -480,7 +505,7 @@ def buscar_ofertas_ripley():
 def buscar_ofertas_easy():
     print("🔍 Buscando ofertas en Easy...", flush=True)
     productos_por_link = {}
-    ya_se_imprimio_diagnostico = False
+    ya_se_imprimieron_pistas = False
 
     for categoria in CLUSTERS_OFERTAS_EASY:
         try:
@@ -492,14 +517,17 @@ def buscar_ofertas_easy():
 
             if respuesta.status_code != 200:
                 print(f"   ⚠️ No pude acceder a {categoria}. Código: {respuesta.status_code}", flush=True)
-                if not ya_se_imprimio_diagnostico:
+                if not ya_se_imprimieron_pistas:
                     imprimir_diagnostico_bloqueo(respuesta)
-                    ya_se_imprimio_diagnostico = True
+                    ya_se_imprimieron_pistas = True
                 continue
 
             datos = extraer_bloque_next_data(respuesta.text)
             if not datos:
                 print(f"   ⚠️ No encontré datos en {categoria}", flush=True)
+                if not ya_se_imprimieron_pistas:
+                    imprimir_pistas_pagina(respuesta.text)
+                    ya_se_imprimieron_pistas = True
                 continue
 
             productos_crudos = (
