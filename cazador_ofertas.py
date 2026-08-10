@@ -1,4 +1,4 @@
-# CAZADOR DE OFERTAS: explora varias tiendas (Falabella, DBS, Paris, Easy),
+# CAZADOR DE OFERTAS: explora varias tiendas (Falabella, DBS, Paris, Easy, Lider),
 # encuentra productos con descuento, evita duplicados, y publica cada uno en
 # el canal correcto (gratis o premium) según qué tan buena sea la oferta.
 # Los descuentos gigantes (75%+) se marcan como POSIBLE ERROR DE PRECIO.
@@ -12,7 +12,8 @@
 # NOTAS DE ESTADO:
 # - Todas las tiendas activas corren desde el celular (Termux).
 # - Ripley: PAUSADO. Su página dejó de incluir el bloque de datos legible.
-# - Falabella: solo entrega datos a IPs "de persona", por eso corre en local.
+# - Lider: NUEVA. Lee la sección "Liquidación Lider" (solo no-perecibles).
+#   Estructura Walmart: initialData -> searchResult -> itemStacks -> items.
 
 import requests
 import json
@@ -96,6 +97,15 @@ PAGINAS_DBS = [
     "https://dbs.cl/sale?p=4",
 ]
 
+# Categorias de "Liquidación Lider" (SOLO no-perecibles).
+# Para agregar más: entra a lider.cl -> Liquidación Lider -> elige una
+# categoría (hogar, tecno, juguetes, etc.), copia la URL del navegador
+# (debe partir con lider.cl/browse/) y pégala aquí como una línea más.
+CATEGORIAS_LIDER = [
+    "https://www.lider.cl/browse/liquidacion-lider/electro/electrohogar/95467052_73455141_77393875",
+]
+DOMINIO_LIDER = "https://www.lider.cl"
+
 DESCUENTO_MINIMO_GRATIS = 30      # 30% a 49% -> canal gratis
 DESCUENTO_MINIMO_PREMIUM = 50     # 50% a 74% -> canal premium
 DESCUENTO_POSIBLE_ERROR = 75      # 75% o más -> premium con alerta de POSIBLE ERROR
@@ -142,6 +152,17 @@ def formatear_precio(numero):
     return f"{numero:,}".replace(",", ".")
 
 
+def precio_texto_a_numero(texto):
+    """
+    Convierte un precio escrito ("$59.990") en número (59990).
+    Devuelve None si no se puede.
+    """
+    if not texto:
+        return None
+    limpio = str(texto).replace("$", "").replace(".", "").replace(" ", "").strip()
+    return int(limpio) if limpio.isdigit() else None
+
+
 def pedir_pagina(url):
     """
     Pide una página web con reintentos automáticos (hasta 3).
@@ -150,7 +171,7 @@ def pedir_pagina(url):
     ultima_respuesta = None
     for intento in range(1, 4):
         try:
-            respuesta = requests.get(url, headers=CABECERAS, timeout=15)
+            respuesta = requests.get(url, headers=CABECERAS, timeout=20)
             ultima_respuesta = respuesta
             if respuesta.status_code == 200:
                 return respuesta
@@ -382,6 +403,93 @@ def buscar_ofertas_paris():
 
 
 # ---------------------------------------------------------------------
+# LECTOR: LIDER (Liquidación Lider — estructura Walmart)
+# ---------------------------------------------------------------------
+def buscar_ofertas_lider():
+    print("🔍 Buscando ofertas en Lider...", flush=True)
+    productos_por_link = {}
+    ya_se_imprimieron_pistas = False
+
+    for categoria in CATEGORIAS_LIDER:
+        try:
+            respuesta = pedir_pagina(categoria)
+
+            if respuesta is None:
+                print(f"   ⚠️ No pude conectarme a {categoria} después de varios intentos.", flush=True)
+                continue
+
+            if respuesta.status_code != 200:
+                print(f"   ⚠️ No pude acceder a {categoria}. Código: {respuesta.status_code}", flush=True)
+                if not ya_se_imprimieron_pistas:
+                    imprimir_diagnostico_bloqueo(respuesta)
+                    ya_se_imprimieron_pistas = True
+                continue
+
+            datos = extraer_bloque_next_data(respuesta.text)
+            if not datos:
+                print(f"   ⚠️ No encontré datos en {categoria}", flush=True)
+                if not ya_se_imprimieron_pistas:
+                    imprimir_pistas_pagina(respuesta.text)
+                    ya_se_imprimieron_pistas = True
+                continue
+
+            pilas = (
+                datos.get("props", {})
+                .get("pageProps", {})
+                .get("initialData", {})
+                .get("searchResult", {})
+                .get("itemStacks", [])
+            )
+
+            if not pilas:
+                print(f"   ⚠️ El bloque de datos de {categoria} venía sin productos (¿cambió el mapa interno?).", flush=True)
+                continue
+
+            for pila in pilas:
+                for producto in pila.get("items", []):
+                    titulo = producto.get("name")
+                    url_relativa = producto.get("canonicalUrl")
+                    info_precio = producto.get("priceInfo") or {}
+
+                    # linePrice = precio actual, wasPrice = precio antes
+                    precio_oferta = precio_texto_a_numero(info_precio.get("linePrice"))
+                    precio_normal = precio_texto_a_numero(info_precio.get("wasPrice"))
+
+                    # Descartar sin datos, sin descuento real, o agotados
+                    if not titulo or not url_relativa or not precio_oferta or not precio_normal:
+                        continue
+                    if precio_oferta >= precio_normal:
+                        continue
+                    if producto.get("isOutOfStock"):
+                        continue
+
+                    titulo = reparar_texto(titulo)
+                    link = DOMINIO_LIDER + url_relativa if url_relativa.startswith("/") else url_relativa
+
+                    descuento = round((1 - (precio_oferta / precio_normal)) * 100)
+
+                    if link in productos_por_link:
+                        continue
+
+                    productos_por_link[link] = {
+                        "tienda": "Lider",
+                        "titulo": titulo,
+                        "precio_oferta": precio_oferta,
+                        "precio_normal": precio_normal,
+                        "descuento": descuento,
+                        "link": link
+                    }
+
+        except Exception as error:
+            print(f"   ⚠️ Error en {categoria}: {error}", flush=True)
+
+        time.sleep(random.uniform(2, 4))
+
+    print(f"   ✅ {len(productos_por_link)} producto(s) único(s) en Lider.", flush=True)
+    return list(productos_por_link.values())
+
+
+# ---------------------------------------------------------------------
 # LECTOR: RIPLEY (PAUSADO - no se llama desde el programa principal)
 # ---------------------------------------------------------------------
 def armar_slug_ripley(texto):
@@ -447,11 +555,7 @@ def buscar_ofertas_ripley():
                 slug = armar_slug_ripley(titulo)
                 link = f"https://simple.ripley.cl/{slug}-{parent_id.lower()}"
 
-                precio_normal = None
-                if precio_normal_texto:
-                    texto_limpio = precio_normal_texto.replace("$", "").replace(".", "").strip()
-                    if texto_limpio.isdigit():
-                        precio_normal = int(texto_limpio)
+                precio_normal = precio_texto_a_numero(precio_normal_texto)
 
                 if link in productos_por_link:
                     continue
@@ -742,6 +846,8 @@ def hacer_una_pasada():
     todos_los_productos += buscar_ofertas_paris()
     time.sleep(3)
     todos_los_productos += buscar_ofertas_easy()
+    time.sleep(3)
+    todos_los_productos += buscar_ofertas_lider()
 
     print(f"\n📦 Total combinado: {len(todos_los_productos)} producto(s).\n", flush=True)
 
@@ -780,7 +886,6 @@ if __name__ == "__main__":
 
     elif MODO == "bucle":
         # MODO BUCLE: pasadas infinitas cada MINUTOS_ENTRE_PASADAS.
-        # Se detiene con CTRL+C (o cerrando Termux).
         activar_candado_energia()
         print(f"🔁 Bucle iniciado: una pasada cada {MINUTOS_ENTRE_PASADAS} minutos. CTRL+C para detener.", flush=True)
         numero_pasada = 0
@@ -792,8 +897,6 @@ if __name__ == "__main__":
                 try:
                     hacer_una_pasada()
                 except Exception as error:
-                    # Si una pasada explota por algo inesperado, el bucle
-                    # NO muere: anota el error y espera hasta la siguiente.
                     print(f"💥 La pasada #{numero_pasada} falló ({error}). El bucle sigue vivo.", flush=True)
                 print(f"😴 {time.strftime('%H:%M:%S')} — Durmiendo {MINUTOS_ENTRE_PASADAS} minutos...", flush=True)
                 time.sleep(MINUTOS_ENTRE_PASADAS * 60)
