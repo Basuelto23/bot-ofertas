@@ -4,15 +4,15 @@
 # Los descuentos gigantes (75%+) se marcan como POSIBLE ERROR DE PRECIO.
 #
 # MODOS DE EJECUCIÓN:
-#   python cazador_ofertas.py local  -> TODAS las tiendas activas (celular)
+#   python cazador_ofertas.py local  -> UNA pasada por todas las tiendas y termina
+#   python cazador_ofertas.py bucle  -> pasadas INFINITAS cada 30 min (CTRL+C para parar)
 #   python cazador_ofertas.py nube   -> nada por ahora (la nube quedó sin tiendas)
 #   python cazador_ofertas.py todas  -> igual que local
 #
-# NOTAS DE ESTADO (27-07-2026):
-# - Todas las tiendas activas corren en modo LOCAL (celular con Termux).
+# NOTAS DE ESTADO:
+# - Todas las tiendas activas corren desde el celular (Termux).
 # - Ripley: PAUSADO. Su página dejó de incluir el bloque de datos legible.
 # - Falabella: solo entrega datos a IPs "de persona", por eso corre en local.
-# - La nube (GitHub Actions) quedó sin tiendas; el workflow está desactivado.
 
 import requests
 import json
@@ -21,6 +21,7 @@ import re
 import time
 import random
 import unicodedata
+import subprocess
 from bs4 import BeautifulSoup
 
 import sys
@@ -31,9 +32,11 @@ sys.stdout.reconfigure(encoding="utf-8")
 # ---------------------------------------------------------------------
 MODO = sys.argv[1].lower() if len(sys.argv) > 1 else "todas"
 
-if MODO not in ("nube", "local", "todas"):
-    print(f"⚠️ El modo '{MODO}' no existe. Opciones: nube, local, todas. Usaré 'todas'.", flush=True)
+if MODO not in ("nube", "local", "todas", "bucle"):
+    print(f"⚠️ El modo '{MODO}' no existe. Opciones: nube, local, todas, bucle. Usaré 'todas'.", flush=True)
     MODO = "todas"
+
+MINUTOS_ENTRE_PASADAS = 30  # espera del modo bucle entre pasada y pasada
 
 # ---------------------------------------------------------------------
 # CREDENCIALES DE TELEGRAM
@@ -67,8 +70,7 @@ CATEGORIAS_RIPLEY = [
     "https://simple.ripley.cl/outlet/moda",
 ]
 
-# Categorias de Easy con ofertas reales
-# (Eliminados los clusters 4343, 6810, 6286 y 7495: daban error 404)
+# Categorias de Easy con ofertas reales (limpiada de clusters muertos)
 CLUSTERS_OFERTAS_EASY = [
     "https://www.easy.cl/cluster/7930",
     "https://www.easy.cl/cluster/7952",
@@ -96,7 +98,7 @@ PAGINAS_DBS = [
 
 DESCUENTO_MINIMO_GRATIS = 30      # 30% a 49% -> canal gratis
 DESCUENTO_MINIMO_PREMIUM = 50     # 50% a 74% -> canal premium
-DESCUENTO_POSIBLE_ERROR = 75      # 75% o más -> premium con alerta de POSIBLE ERROR DE PRECIO
+DESCUENTO_POSIBLE_ERROR = 75      # 75% o más -> premium con alerta de POSIBLE ERROR
 
 # Cada modo usa su propio "cuaderno de memoria"
 if MODO == "nube":
@@ -123,12 +125,6 @@ CABECERAS = {
     "sec-ch-ua-platform": '"Windows"',
     "Cache-Control": "max-age=0",
 }
-
-# Pequeña espera aleatoria antes de empezar.
-segundos_espera = random.randint(5, 40)
-print(f"⏳ Esperando {segundos_espera} segundos antes de empezar...", flush=True)
-time.sleep(segundos_espera)
-print("▶️ Empezando a buscar ofertas...", flush=True)
 
 
 # ---------------------------------------------------------------------
@@ -644,8 +640,7 @@ def enviar_alerta_telegram(datos, chat_id, es_premium):
     """
     Envía la alerta a Telegram con hasta 3 reintentos. Devuelve True si
     se envió, False si no. Los descuentos gigantes (75%+) se marcan como
-    POSIBLE ERROR DE PRECIO, con advertencia de que la tienda podría
-    corregirlo o anular la compra.
+    POSIBLE ERROR DE PRECIO.
     """
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
 
@@ -700,7 +695,7 @@ def enviar_alerta_telegram(datos, chat_id, es_premium):
             print(f"   ⚠️ Intento {intento} de envío falló por conexión, reintentando...", flush=True)
             time.sleep(5 * intento)
 
-    print(f"   ❌ No pude enviar esta oferta tras 3 intentos. Saldrá en la próxima corrida.", flush=True)
+    print(f"   ❌ No pude enviar esta oferta tras 3 intentos. Saldrá en la próxima pasada.", flush=True)
     return False
 
 
@@ -736,25 +731,17 @@ def procesar_producto(producto, historial):
     return historial
 
 
-if __name__ == "__main__":
-    print("=" * 50, flush=True)
-    print(f"🤖 Modo de ejecución: {MODO.upper()}", flush=True)
-    print(f"🗂️ Cuaderno de memoria: {ARCHIVO_HISTORIAL}", flush=True)
-
+def hacer_una_pasada():
+    """Una pasada completa: busca en todas las tiendas activas y envía lo nuevo."""
     todos_los_productos = []
 
-    # Todas las tiendas activas corren en modo local (celular).
-    if MODO in ("local", "todas"):
-        todos_los_productos += buscar_ofertas_falabella()
-        time.sleep(3)
-        todos_los_productos += buscar_ofertas_dbs()
-        time.sleep(3)
-        todos_los_productos += buscar_ofertas_paris()
-        time.sleep(3)
-        todos_los_productos += buscar_ofertas_easy()
-
-    if MODO == "nube":
-        print("ℹ️ El modo nube no tiene tiendas asignadas actualmente.", flush=True)
+    todos_los_productos += buscar_ofertas_falabella()
+    time.sleep(3)
+    todos_los_productos += buscar_ofertas_dbs()
+    time.sleep(3)
+    todos_los_productos += buscar_ofertas_paris()
+    time.sleep(3)
+    todos_los_productos += buscar_ofertas_easy()
 
     print(f"\n📦 Total combinado: {len(todos_los_productos)} producto(s).\n", flush=True)
 
@@ -768,4 +755,55 @@ if __name__ == "__main__":
             enviados += 1
             guardar_historial(historial)
 
-    print(f"\n✅ Listo. Se enviaron {enviados} alerta(s) nueva(s). Historial actualizado.", flush=True)
+    print(f"\n✅ Pasada lista. Se enviaron {enviados} alerta(s) nueva(s).", flush=True)
+
+
+def activar_candado_energia():
+    """
+    En Termux, le pide a Android que no duerma el proceso aunque se
+    apague la pantalla. Si no estamos en Termux, no pasa nada.
+    """
+    try:
+        subprocess.run(["termux-wake-lock"], timeout=5)
+        print("🔒 Candado de energía activado (termux-wake-lock).", flush=True)
+    except Exception:
+        pass
+
+
+if __name__ == "__main__":
+    print("=" * 50, flush=True)
+    print(f"🤖 Modo de ejecución: {MODO.upper()}", flush=True)
+    print(f"🗂️ Cuaderno de memoria: {ARCHIVO_HISTORIAL}", flush=True)
+
+    if MODO == "nube":
+        print("ℹ️ El modo nube no tiene tiendas asignadas actualmente.", flush=True)
+
+    elif MODO == "bucle":
+        # MODO BUCLE: pasadas infinitas cada MINUTOS_ENTRE_PASADAS.
+        # Se detiene con CTRL+C (o cerrando Termux).
+        activar_candado_energia()
+        print(f"🔁 Bucle iniciado: una pasada cada {MINUTOS_ENTRE_PASADAS} minutos. CTRL+C para detener.", flush=True)
+        numero_pasada = 0
+        try:
+            while True:
+                numero_pasada += 1
+                print("\n" + "=" * 50, flush=True)
+                print(f"🕐 {time.strftime('%H:%M:%S')} — Pasada #{numero_pasada}", flush=True)
+                try:
+                    hacer_una_pasada()
+                except Exception as error:
+                    # Si una pasada explota por algo inesperado, el bucle
+                    # NO muere: anota el error y espera hasta la siguiente.
+                    print(f"💥 La pasada #{numero_pasada} falló ({error}). El bucle sigue vivo.", flush=True)
+                print(f"😴 {time.strftime('%H:%M:%S')} — Durmiendo {MINUTOS_ENTRE_PASADAS} minutos...", flush=True)
+                time.sleep(MINUTOS_ENTRE_PASADAS * 60)
+        except KeyboardInterrupt:
+            print("\n🛑 Bucle detenido a mano. ¡Hasta la próxima!", flush=True)
+
+    else:
+        # Modos local / todas: UNA pasada y termina.
+        segundos_espera = random.randint(5, 40)
+        print(f"⏳ Esperando {segundos_espera} segundos antes de empezar...", flush=True)
+        time.sleep(segundos_espera)
+        hacer_una_pasada()
+        print("Historial actualizado.", flush=True)
