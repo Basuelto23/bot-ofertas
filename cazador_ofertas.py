@@ -1,6 +1,7 @@
 # CAZADOR DE OFERTAS: explora varias tiendas (Falabella, DBS, Paris, Easy),
 # encuentra productos con descuento, evita duplicados, y publica cada uno en
 # el canal correcto (gratis o premium) según qué tan buena sea la oferta.
+# Los descuentos gigantes (75%+) se marcan como POSIBLE ERROR DE PRECIO.
 #
 # MODOS DE EJECUCIÓN:
 #   python cazador_ofertas.py local  -> TODAS las tiendas activas (celular)
@@ -10,9 +11,8 @@
 # NOTAS DE ESTADO (27-07-2026):
 # - Todas las tiendas activas corren en modo LOCAL (celular con Termux).
 # - Ripley: PAUSADO. Su página dejó de incluir el bloque de datos legible.
-# - Falabella: solo entrega datos a IPs "de persona" (celular/casa), por eso
-#   se movió del modo nube al modo local.
-# - La nube (GitHub Actions) quedó sin tiendas; el workflow se puede desactivar.
+# - Falabella: solo entrega datos a IPs "de persona", por eso corre en local.
+# - La nube (GitHub Actions) quedó sin tiendas; el workflow está desactivado.
 
 import requests
 import json
@@ -59,7 +59,7 @@ MAX_PAGINAS_FALABELLA = 5
 URL_OFERTAS_PARIS = "https://www.paris.cl/mujer/ofertas/"
 DOMINIO_PARIS = "https://www.paris.cl"
 
-# Las categorias "outlet" de Ripley (PAUSADO, ver nota de arriba)
+# Las categorias "outlet" de Ripley (PAUSADO)
 CATEGORIAS_RIPLEY = [
     "https://simple.ripley.cl/outlet/calzado",
     "https://simple.ripley.cl/outlet/decohogar",
@@ -67,16 +67,15 @@ CATEGORIAS_RIPLEY = [
     "https://simple.ripley.cl/outlet/moda",
 ]
 
-# Categorias de Easy con ofertas reales (cluster 4343 eliminado: daba 404)
+# Categorias de Easy con ofertas reales
+# (Eliminados los clusters 4343, 6810, 6286 y 7495: daban error 404)
 CLUSTERS_OFERTAS_EASY = [
     "https://www.easy.cl/cluster/7930",
     "https://www.easy.cl/cluster/7952",
     "https://www.easy.cl/cluster/8098",
     "https://www.easy.cl/cluster/8100",
     "https://www.easy.cl/cluster/3006",
-    "https://www.easy.cl/cluster/6810",
     "https://www.easy.cl/cluster/3003",
-    "https://www.easy.cl/cluster/6286",
     "https://www.easy.cl/cluster/5360",
     "https://www.easy.cl/cluster/7054",
     "https://www.easy.cl/cluster/8084",
@@ -84,11 +83,10 @@ CLUSTERS_OFERTAS_EASY = [
     "https://www.easy.cl/cluster/6826",
     "https://www.easy.cl/cluster/4428",
     "https://www.easy.cl/cluster/1582",
-    "https://www.easy.cl/cluster/7495",
     "https://www.easy.cl/cluster/5359",
 ]
 
-# Las 4 paginas de ofertas de DBS (tienda de belleza y cosmetica)
+# Las 4 paginas de ofertas de DBS
 PAGINAS_DBS = [
     "https://dbs.cl/sale",
     "https://dbs.cl/sale?p=2",
@@ -96,8 +94,9 @@ PAGINAS_DBS = [
     "https://dbs.cl/sale?p=4",
 ]
 
-DESCUENTO_MINIMO_GRATIS = 30    # 30% a 49% -> canal gratis
-DESCUENTO_MINIMO_PREMIUM = 50   # 50% o más -> canal premium
+DESCUENTO_MINIMO_GRATIS = 30      # 30% a 49% -> canal gratis
+DESCUENTO_MINIMO_PREMIUM = 50     # 50% a 74% -> canal premium
+DESCUENTO_POSIBLE_ERROR = 75      # 75% o más -> premium con alerta de POSIBLE ERROR DE PRECIO
 
 # Cada modo usa su propio "cuaderno de memoria"
 if MODO == "nube":
@@ -125,7 +124,7 @@ CABECERAS = {
     "Cache-Control": "max-age=0",
 }
 
-# Pequeña espera aleatoria antes de empezar, para no ser tan predecibles.
+# Pequeña espera aleatoria antes de empezar.
 segundos_espera = random.randint(5, 40)
 print(f"⏳ Esperando {segundos_espera} segundos antes de empezar...", flush=True)
 time.sleep(segundos_espera)
@@ -150,8 +149,7 @@ def formatear_precio(numero):
 def pedir_pagina(url):
     """
     Pide una página web con reintentos automáticos (hasta 3).
-    Si la tienda nos BLOQUEA (403) o la página no existe (404), no
-    reintenta. Devuelve la respuesta, o None si nunca hubo respuesta.
+    Con 403 o 404 no reintenta. Devuelve la respuesta o None.
     """
     ultima_respuesta = None
     for intento in range(1, 4):
@@ -644,13 +642,24 @@ def buscar_ofertas_dbs():
 # ---------------------------------------------------------------------
 def enviar_alerta_telegram(datos, chat_id, es_premium):
     """
-    Envía la alerta a Telegram con hasta 3 reintentos si la conexión
-    falla. Devuelve True si se envió, False si no (y el programa sigue
-    con las demás ofertas en vez de morirse).
+    Envía la alerta a Telegram con hasta 3 reintentos. Devuelve True si
+    se envió, False si no. Los descuentos gigantes (75%+) se marcan como
+    POSIBLE ERROR DE PRECIO, con advertencia de que la tienda podría
+    corregirlo o anular la compra.
     """
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
 
-    etiqueta = "💎 <b>OFERTA PREMIUM</b> 💎" if es_premium else "🔥 <b>¡OFERTA!</b> 🔥"
+    es_posible_error = datos["descuento"] >= DESCUENTO_POSIBLE_ERROR
+
+    if es_posible_error:
+        etiqueta = "⚡🚨 <b>POSIBLE ERROR DE PRECIO</b> 🚨⚡"
+        advertencia = "\n⚠️ <i>Descuento inusualmente alto. ¡Corre antes de que lo corrijan! La tienda podría anular la compra si confirma que fue un error.</i>\n"
+    elif es_premium:
+        etiqueta = "💎 <b>OFERTA PREMIUM</b> 💎"
+        advertencia = ""
+    else:
+        etiqueta = "🔥 <b>¡OFERTA!</b> 🔥"
+        advertencia = ""
 
     mensaje = (
         f"{etiqueta}\n\n"
@@ -658,7 +667,8 @@ def enviar_alerta_telegram(datos, chat_id, es_premium):
         f"📦 <b>{datos['titulo']}</b>\n\n"
         f"💰 Precio oferta: <b>${formatear_precio(datos['precio_oferta'])}</b>\n"
         f"🏷️ Precio normal: <s>${formatear_precio(datos['precio_normal'])}</s>\n"
-        f"📉 Descuento: <b>{datos['descuento']}%</b>\n\n"
+        f"📉 Descuento: <b>{datos['descuento']}%</b>\n"
+        f"{advertencia}\n"
         f"🔗 <a href=\"{datos['link']}\">Ver producto</a>"
     )
 
@@ -674,7 +684,8 @@ def enviar_alerta_telegram(datos, chat_id, es_premium):
             respuesta = requests.post(url, data=datos_envio, timeout=15)
 
             if respuesta.status_code == 200:
-                print(f"   ✅ Enviado a canal {'PREMIUM' if es_premium else 'GRATIS'}", flush=True)
+                tipo = "POSIBLE ERROR" if es_posible_error else ("PREMIUM" if es_premium else "GRATIS")
+                print(f"   ✅ Enviado a canal ({tipo})", flush=True)
                 return True
 
             if respuesta.status_code == 429:
@@ -733,7 +744,6 @@ if __name__ == "__main__":
     todos_los_productos = []
 
     # Todas las tiendas activas corren en modo local (celular).
-    # La nube quedó sin tiendas asignadas por ahora.
     if MODO in ("local", "todas"):
         todos_los_productos += buscar_ofertas_falabella()
         time.sleep(3)
