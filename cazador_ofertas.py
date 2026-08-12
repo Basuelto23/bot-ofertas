@@ -2,6 +2,8 @@
 # encuentra productos con descuento, evita duplicados, y publica cada uno en
 # el canal correcto (gratis o premium) según qué tan buena sea la oferta.
 # Los descuentos gigantes (75%+) se marcan como POSIBLE ERROR DE PRECIO.
+# Los productos que calcen con lista_deseos.txt se marcan con 🎯 y se
+# avisan desde un descuento más bajo (15%).
 #
 # MODOS DE EJECUCIÓN:
 #   python cazador_ofertas.py local  -> UNA pasada por todas las tiendas y termina
@@ -9,11 +11,10 @@
 #   python cazador_ofertas.py nube   -> nada por ahora (la nube quedó sin tiendas)
 #   python cazador_ofertas.py todas  -> igual que local
 #
-# NOTAS DE ESTADO:
-# - Todas las tiendas activas corren desde el celular (Termux).
-# - Ripley: PAUSADO. Su página dejó de incluir el bloque de datos legible.
-# - Lider: NUEVA. Lee la sección "Liquidación Lider" (solo no-perecibles).
-#   Estructura Walmart: initialData -> searchResult -> itemStacks -> items.
+# LISTA DE DESEOS:
+#   Crea un archivo lista_deseos.txt en la misma carpeta, con una palabra
+#   o frase por línea (ej: zapatilla / iphone / samsung galaxy). Las líneas
+#   que empiecen con # se ignoran. Si el archivo no existe, no pasa nada.
 
 import requests
 import json
@@ -71,7 +72,7 @@ CATEGORIAS_RIPLEY = [
     "https://simple.ripley.cl/outlet/moda",
 ]
 
-# Categorias de Easy con ofertas reales (limpiada de clusters muertos)
+# Categorias de Easy con ofertas reales
 CLUSTERS_OFERTAS_EASY = [
     "https://www.easy.cl/cluster/7930",
     "https://www.easy.cl/cluster/7952",
@@ -98,9 +99,8 @@ PAGINAS_DBS = [
 ]
 
 # Categorias de "Liquidación Lider" (SOLO no-perecibles).
-# Para agregar más: entra a lider.cl -> Liquidación Lider -> elige una
-# categoría (hogar, tecno, juguetes, etc.), copia la URL del navegador
-# (debe partir con lider.cl/browse/) y pégala aquí como una línea más.
+# Para agregar más: lider.cl -> Liquidación Lider -> elige categoría ->
+# copia la URL (debe partir con lider.cl/browse/) y pégala aquí.
 CATEGORIAS_LIDER = [
     "https://www.lider.cl/browse/liquidacion-lider/electro/electrohogar/95467052_73455141_77393875",
 ]
@@ -109,6 +109,9 @@ DOMINIO_LIDER = "https://www.lider.cl"
 DESCUENTO_MINIMO_GRATIS = 30      # 30% a 49% -> canal gratis
 DESCUENTO_MINIMO_PREMIUM = 50     # 50% a 74% -> canal premium
 DESCUENTO_POSIBLE_ERROR = 75      # 75% o más -> premium con alerta de POSIBLE ERROR
+DESCUENTO_MINIMO_DESEOS = 15      # productos de la lista de deseos avisan desde este %
+
+ARCHIVO_LISTA_DESEOS = "lista_deseos.txt"
 
 # Cada modo usa su propio "cuaderno de memoria"
 if MODO == "nube":
@@ -152,15 +155,47 @@ def formatear_precio(numero):
     return f"{numero:,}".replace(",", ".")
 
 
+def normalizar(texto):
+    """
+    Deja un texto en minúsculas y sin tildes, para comparar sin dramas.
+    'Zapatilla Deportiva Ñuñoa' -> 'zapatilla deportiva nunoa'
+    """
+    texto = texto.lower()
+    texto = unicodedata.normalize("NFKD", texto)
+    return texto.encode("ascii", "ignore").decode("utf-8")
+
+
 def precio_texto_a_numero(texto):
-    """
-    Convierte un precio escrito ("$59.990") en número (59990).
-    Devuelve None si no se puede.
-    """
+    """Convierte un precio escrito ("$59.990") en número (59990)."""
     if not texto:
         return None
     limpio = str(texto).replace("$", "").replace(".", "").replace(" ", "").strip()
     return int(limpio) if limpio.isdigit() else None
+
+
+def cargar_lista_deseos():
+    """
+    Lee lista_deseos.txt (una palabra o frase por línea; # = comentario).
+    Devuelve la lista normalizada. Si el archivo no existe, lista vacía.
+    """
+    if not os.path.exists(ARCHIVO_LISTA_DESEOS):
+        return []
+    deseos = []
+    with open(ARCHIVO_LISTA_DESEOS, "r", encoding="utf-8") as archivo:
+        for linea in archivo:
+            linea = linea.strip()
+            if linea and not linea.startswith("#"):
+                deseos.append(normalizar(linea))
+    return deseos
+
+
+def buscar_deseo(titulo, lista_deseos):
+    """Devuelve la palabra de la lista que aparece en el título, o None."""
+    titulo_normalizado = normalizar(titulo)
+    for palabra in lista_deseos:
+        if palabra in titulo_normalizado:
+            return palabra
+    return None
 
 
 def pedir_pagina(url):
@@ -442,7 +477,7 @@ def buscar_ofertas_lider():
             )
 
             if not pilas:
-                print(f"   ⚠️ El bloque de datos de {categoria} venía sin productos (¿cambió el mapa interno?).", flush=True)
+                print(f"   ⚠️ El bloque de datos de {categoria} venía sin productos.", flush=True)
                 continue
 
             for pila in pilas:
@@ -451,11 +486,9 @@ def buscar_ofertas_lider():
                     url_relativa = producto.get("canonicalUrl")
                     info_precio = producto.get("priceInfo") or {}
 
-                    # linePrice = precio actual, wasPrice = precio antes
                     precio_oferta = precio_texto_a_numero(info_precio.get("linePrice"))
                     precio_normal = precio_texto_a_numero(info_precio.get("wasPrice"))
 
-                    # Descartar sin datos, sin descuento real, o agotados
                     if not titulo or not url_relativa or not precio_oferta or not precio_normal:
                         continue
                     if precio_oferta >= precio_normal:
@@ -744,7 +777,8 @@ def enviar_alerta_telegram(datos, chat_id, es_premium):
     """
     Envía la alerta a Telegram con hasta 3 reintentos. Devuelve True si
     se envió, False si no. Los descuentos gigantes (75%+) se marcan como
-    POSIBLE ERROR DE PRECIO.
+    POSIBLE ERROR DE PRECIO. Los productos de la lista de deseos llevan
+    la marca 🎯 DE TU LISTA.
     """
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
 
@@ -760,8 +794,13 @@ def enviar_alerta_telegram(datos, chat_id, es_premium):
         etiqueta = "🔥 <b>¡OFERTA!</b> 🔥"
         advertencia = ""
 
+    linea_deseo = ""
+    if datos.get("deseo"):
+        linea_deseo = f"🎯 <b>DE TU LISTA:</b> {datos['deseo']}\n"
+
     mensaje = (
-        f"{etiqueta}\n\n"
+        f"{etiqueta}\n"
+        f"{linea_deseo}\n"
         f"🏬 <i>{datos['tienda']}</i>\n"
         f"📦 <b>{datos['titulo']}</b>\n\n"
         f"💰 Precio oferta: <b>${formatear_precio(datos['precio_oferta'])}</b>\n"
@@ -806,11 +845,17 @@ def enviar_alerta_telegram(datos, chat_id, es_premium):
 # ---------------------------------------------------------------------
 # LÓGICA PRINCIPAL
 # ---------------------------------------------------------------------
-def procesar_producto(producto, historial):
+def procesar_producto(producto, historial, lista_deseos):
     descuento = producto["descuento"]
     link = producto["link"]
 
-    if descuento < DESCUENTO_MINIMO_GRATIS:
+    # ¿Calza con la lista de deseos?
+    deseo = buscar_deseo(producto["titulo"], lista_deseos) if lista_deseos else None
+    producto["deseo"] = deseo
+
+    # Umbral: los deseos avisan desde más abajo (15%), el resto desde 30%
+    umbral = DESCUENTO_MINIMO_DESEOS if deseo else DESCUENTO_MINIMO_GRATIS
+    if descuento < umbral:
         return historial
 
     es_premium = descuento >= DESCUENTO_MINIMO_PREMIUM
@@ -819,7 +864,8 @@ def procesar_producto(producto, historial):
     registro_anterior = historial.get(link)
 
     if registro_anterior is None:
-        print(f"🆕 Nuevo [{producto['tienda']}]: {producto['titulo']} ({descuento}%)", flush=True)
+        marca_deseo = " 🎯" if deseo else ""
+        print(f"🆕 Nuevo{marca_deseo} [{producto['tienda']}]: {producto['titulo']} ({descuento}%)", flush=True)
         se_envio = enviar_alerta_telegram(producto, chat_id, es_premium)
         if se_envio:
             historial[link] = {"precio_oferta": producto["precio_oferta"], "canal": "premium" if es_premium else "gratis"}
@@ -837,6 +883,12 @@ def procesar_producto(producto, historial):
 
 def hacer_una_pasada():
     """Una pasada completa: busca en todas las tiendas activas y envía lo nuevo."""
+    lista_deseos = cargar_lista_deseos()
+    if lista_deseos:
+        print(f"🎯 Lista de deseos activa ({len(lista_deseos)} palabra(s)): {', '.join(lista_deseos)}", flush=True)
+    else:
+        print("🎯 Sin lista de deseos (crea lista_deseos.txt si quieres usarla).", flush=True)
+
     todos_los_productos = []
 
     todos_los_productos += buscar_ofertas_falabella()
@@ -856,7 +908,7 @@ def hacer_una_pasada():
     enviados = 0
     for producto in todos_los_productos:
         antes = len(historial)
-        historial = procesar_producto(producto, historial)
+        historial = procesar_producto(producto, historial, lista_deseos)
         if len(historial) > antes:
             enviados += 1
             guardar_historial(historial)
@@ -865,10 +917,7 @@ def hacer_una_pasada():
 
 
 def activar_candado_energia():
-    """
-    En Termux, le pide a Android que no duerma el proceso aunque se
-    apague la pantalla. Si no estamos en Termux, no pasa nada.
-    """
+    """En Termux, evita que Android duerma el proceso con la pantalla apagada."""
     try:
         subprocess.run(["termux-wake-lock"], timeout=5)
         print("🔒 Candado de energía activado (termux-wake-lock).", flush=True)
@@ -885,7 +934,6 @@ if __name__ == "__main__":
         print("ℹ️ El modo nube no tiene tiendas asignadas actualmente.", flush=True)
 
     elif MODO == "bucle":
-        # MODO BUCLE: pasadas infinitas cada MINUTOS_ENTRE_PASADAS.
         activar_candado_energia()
         print(f"🔁 Bucle iniciado: una pasada cada {MINUTOS_ENTRE_PASADAS} minutos. CTRL+C para detener.", flush=True)
         numero_pasada = 0
@@ -904,7 +952,6 @@ if __name__ == "__main__":
             print("\n🛑 Bucle detenido a mano. ¡Hasta la próxima!", flush=True)
 
     else:
-        # Modos local / todas: UNA pasada y termina.
         segundos_espera = random.randint(5, 40)
         print(f"⏳ Esperando {segundos_espera} segundos antes de empezar...", flush=True)
         time.sleep(segundos_espera)
