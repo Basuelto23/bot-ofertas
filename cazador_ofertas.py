@@ -8,13 +8,16 @@
 # MODOS DE EJECUCIÓN:
 #   python cazador_ofertas.py local  -> UNA pasada por todas las tiendas y termina
 #   python cazador_ofertas.py bucle  -> pasadas INFINITAS cada 30 min (CTRL+C para parar)
-#   python cazador_ofertas.py nube   -> nada por ahora (la nube quedó sin tiendas)
+#   python cazador_ofertas.py nube   -> nada por ahora
 #   python cazador_ofertas.py todas  -> igual que local
 #
-# LISTA DE DESEOS:
-#   Crea un archivo lista_deseos.txt en la misma carpeta, con una palabra
-#   o frase por línea (ej: zapatilla / iphone / samsung galaxy). Las líneas
-#   que empiecen con # se ignoran. Si el archivo no existe, no pasa nada.
+# NOTAS DE ESTADO:
+# - Falabella: se leen PÁGINAS DE CATEGORÍA (su antigua colección de ofertas
+#   quedó vacía tras un rediseño). Para agregar categorías: navega en
+#   falabella.com a la categoría (la URL contiene "/category/") y pégala
+#   en CATEGORIAS_FALABELLA. ¡No sirven URLs de "/product/"!
+# - Ripley: PAUSADO. Su página dejó de incluir el bloque de datos legible.
+# - Lider: lee "Liquidación Lider" (no-perecibles).
 
 import requests
 import json
@@ -58,8 +61,16 @@ except ImportError:
 # ---------------------------------------------------------------------
 # CONFIGURACIÓN GENERAL
 # ---------------------------------------------------------------------
-URL_OFERTAS_FALABELLA = "https://www.falabella.com/falabella-cl/collection/ofertas"
-MAX_PAGINAS_FALABELLA = 5
+# Categorías de Falabella a vigilar (URLs con "/category/").
+CATEGORIAS_FALABELLA = [
+    "https://www.falabella.com/falabella-cl/category/cat2018/Celulares-y-Telefonos",
+    "https://www.falabella.com/falabella-cl/category/cat4830/Zapatillas",
+    "https://www.falabella.com/falabella-cl/category/cat2005/Computacion",
+    "https://www.falabella.com/falabella-cl/category/cat3205/Perfumes",
+    "https://www.falabella.com/falabella-cl/category/cat3145/Camas",
+    "https://www.falabella.com/falabella-cl/category/cat2032/Audio",
+]
+MAX_PAGINAS_FALABELLA = 3
 
 URL_OFERTAS_PARIS = "https://www.paris.cl/mujer/ofertas/"
 DOMINIO_PARIS = "https://www.paris.cl"
@@ -156,10 +167,7 @@ def formatear_precio(numero):
 
 
 def normalizar(texto):
-    """
-    Deja un texto en minúsculas y sin tildes, para comparar sin dramas.
-    'Zapatilla Deportiva Ñuñoa' -> 'zapatilla deportiva nunoa'
-    """
+    """Minúsculas y sin tildes, para comparar sin dramas."""
     texto = texto.lower()
     texto = unicodedata.normalize("NFKD", texto)
     return texto.encode("ascii", "ignore").decode("utf-8")
@@ -271,7 +279,7 @@ def guardar_historial(historial):
 
 
 # ---------------------------------------------------------------------
-# LECTOR: FALABELLA (varias páginas)
+# LECTOR: FALABELLA (por categorías, con paginación)
 # ---------------------------------------------------------------------
 def extraer_precio_falabella(producto, tipo_buscado):
     for paquete_precio in producto.get("prices", []):
@@ -285,67 +293,76 @@ def extraer_precio_falabella(producto, tipo_buscado):
 def buscar_ofertas_falabella():
     print("🔍 Buscando ofertas en Falabella...", flush=True)
     productos_por_link = {}
+    ya_se_imprimieron_pistas = False
 
-    for numero_pagina in range(1, MAX_PAGINAS_FALABELLA + 1):
-        if numero_pagina == 1:
-            url = URL_OFERTAS_FALABELLA
-        else:
-            url = f"{URL_OFERTAS_FALABELLA}?page={numero_pagina}"
+    for categoria in CATEGORIAS_FALABELLA:
+        nombre_corto = categoria.rstrip("/").split("/")[-1]
+        for numero_pagina in range(1, MAX_PAGINAS_FALABELLA + 1):
+            if numero_pagina == 1:
+                url = categoria
+            else:
+                separador = "&" if "?" in categoria else "?"
+                url = f"{categoria}{separador}page={numero_pagina}"
 
-        respuesta = pedir_pagina(url)
+            respuesta = pedir_pagina(url)
 
-        if respuesta is None:
-            print(f"   ⚠️ No pude conectarme a la página {numero_pagina} de Falabella.", flush=True)
-            break
+            if respuesta is None:
+                print(f"   ⚠️ No pude conectarme a {nombre_corto} pág. {numero_pagina}.", flush=True)
+                break
 
-        respuesta.encoding = "utf-8"
+            respuesta.encoding = "utf-8"
 
-        if respuesta.status_code != 200:
-            print(f"   ⚠️ Página {numero_pagina} de Falabella respondió código {respuesta.status_code}.", flush=True)
-            break
+            if respuesta.status_code != 200:
+                print(f"   ⚠️ {nombre_corto} pág. {numero_pagina} respondió código {respuesta.status_code}.", flush=True)
+                break
 
-        datos = extraer_bloque_next_data(respuesta.text)
-        if not datos:
-            print(f"   ⚠️ No encontré el bloque de datos en la página {numero_pagina} de Falabella.", flush=True)
-            imprimir_pistas_pagina(respuesta.text)
-            break
+            datos = extraer_bloque_next_data(respuesta.text)
+            if not datos:
+                print(f"   ⚠️ Sin bloque de datos en {nombre_corto} pág. {numero_pagina}.", flush=True)
+                if not ya_se_imprimieron_pistas:
+                    imprimir_pistas_pagina(respuesta.text)
+                    ya_se_imprimieron_pistas = True
+                break
 
-        resultados_crudos = datos.get("props", {}).get("pageProps", {}).get("results", [])
+            resultados_crudos = datos.get("props", {}).get("pageProps", {}).get("results", [])
+            if not isinstance(resultados_crudos, list):
+                resultados_crudos = []
 
-        nuevos_en_esta_pagina = 0
-        for producto in resultados_crudos:
-            titulo = producto.get("displayName")
-            if titulo:
-                titulo = reparar_texto(titulo)
+            nuevos_en_esta_pagina = 0
+            for producto in resultados_crudos:
+                titulo = producto.get("displayName")
+                if titulo:
+                    titulo = reparar_texto(titulo)
 
-            link = producto.get("url")
-            precio_oferta = extraer_precio_falabella(producto, "internetPrice")
-            precio_normal = extraer_precio_falabella(producto, "normalPrice")
+                link = producto.get("url")
+                precio_oferta = extraer_precio_falabella(producto, "internetPrice")
+                precio_normal = extraer_precio_falabella(producto, "normalPrice")
 
-            if not titulo or not link or not precio_oferta or not precio_normal or precio_normal == 0:
-                continue
+                if not titulo or not link or not precio_oferta or not precio_normal or precio_normal == 0:
+                    continue
+                if precio_oferta >= precio_normal:
+                    continue
+                if link in productos_por_link:
+                    continue
 
-            if link in productos_por_link:
-                continue
+                descuento = round((1 - (precio_oferta / precio_normal)) * 100)
 
-            descuento = round((1 - (precio_oferta / precio_normal)) * 100)
+                productos_por_link[link] = {
+                    "tienda": "Falabella",
+                    "titulo": titulo,
+                    "precio_oferta": precio_oferta,
+                    "precio_normal": precio_normal,
+                    "descuento": descuento,
+                    "link": link
+                }
+                nuevos_en_esta_pagina += 1
 
-            productos_por_link[link] = {
-                "tienda": "Falabella",
-                "titulo": titulo,
-                "precio_oferta": precio_oferta,
-                "precio_normal": precio_normal,
-                "descuento": descuento,
-                "link": link
-            }
-            nuevos_en_esta_pagina += 1
+            print(f"   📄 {nombre_corto} pág. {numero_pagina}: {nuevos_en_esta_pagina} producto(s) con descuento.", flush=True)
 
-        print(f"   📄 Página {numero_pagina}: {nuevos_en_esta_pagina} producto(s) nuevo(s).", flush=True)
+            if len(resultados_crudos) == 0:
+                break
 
-        if nuevos_en_esta_pagina == 0:
-            break
-
-        time.sleep(random.uniform(2, 4))
+            time.sleep(random.uniform(2, 4))
 
     print(f"   ✅ {len(productos_por_link)} producto(s) único(s) en Falabella.", flush=True)
     return list(productos_por_link.values())
@@ -776,9 +793,7 @@ def buscar_ofertas_dbs():
 def enviar_alerta_telegram(datos, chat_id, es_premium):
     """
     Envía la alerta a Telegram con hasta 3 reintentos. Devuelve True si
-    se envió, False si no. Los descuentos gigantes (75%+) se marcan como
-    POSIBLE ERROR DE PRECIO. Los productos de la lista de deseos llevan
-    la marca 🎯 DE TU LISTA.
+    se envió, False si no.
     """
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
 
@@ -849,11 +864,9 @@ def procesar_producto(producto, historial, lista_deseos):
     descuento = producto["descuento"]
     link = producto["link"]
 
-    # ¿Calza con la lista de deseos?
     deseo = buscar_deseo(producto["titulo"], lista_deseos) if lista_deseos else None
     producto["deseo"] = deseo
 
-    # Umbral: los deseos avisan desde más abajo (15%), el resto desde 30%
     umbral = DESCUENTO_MINIMO_DESEOS if deseo else DESCUENTO_MINIMO_GRATIS
     if descuento < umbral:
         return historial
@@ -885,7 +898,7 @@ def hacer_una_pasada():
     """Una pasada completa: busca en todas las tiendas activas y envía lo nuevo."""
     lista_deseos = cargar_lista_deseos()
     if lista_deseos:
-        print(f"🎯 Lista de deseos activa ({len(lista_deseos)} palabra(s)): {', '.join(lista_deseos)}", flush=True)
+        print(f"🎯 Lista de deseos activa ({len(lista_deseos)} palabra(s)).", flush=True)
     else:
         print("🎯 Sin lista de deseos (crea lista_deseos.txt si quieres usarla).", flush=True)
 
