@@ -24,16 +24,26 @@
 # - Paris: ahora recorre 3 secciones de ofertas (mujer/hombre/tecnología)
 #   con paginación, en vez de solo "mujer" y una sola página.
 # - Easy: ahora pagina cada cluster en vez de leer solo la primera página.
-# - MercadoLibre: agregado como EXPERIMENTAL. No se pudo probar de
-#   antemano (mercadolibre.cl bloquea las herramientas de investigación),
-#   así que puede que el selector de HTML no calce a la primera. Si sale
-#   con 0 productos siempre, revisa los "🔬 Pistas" que imprime y avisa
-#   para ajustar los selectores.
-# - Jumbo: NO agregado todavía. jumbo.cl/jumbo-ofertas (3.871 productos,
-#   97 páginas) carga los datos con JavaScript del lado del cliente, no
-#   vienen en el HTML inicial como en Falabella/Lider. Necesita either
-#   encontrar el endpoint interno que llama esa página (con DevTools) o
-#   un navegador real (Playwright) para renderizarla. Pendiente.
+# - MercadoLibre: la URL correcta es mercadolibre.cl/ofertas (NO
+#   listado.mercadolibre.cl/ofertas, esa devuelve una página vacía). Ya
+#   verificado con un navegador real: usa tarjetas "poly-card" con
+#   "poly-component__title" y "andes-money-amount__fraction" para los
+#   precios, que es justo lo que el código busca. Pagina con "?page=2".
+# - Jumbo: SÍ se puede leer liviano (con solo "requests"), pero no de la
+#   forma obvia. jumbo-ofertas no trae los productos en un bloque JSON
+#   limpio tipo Falabella: los datos vienen repartidos en varios
+#   <script>self.__next_f.push([...])</script> (formato interno de
+#   Next.js) con el JSON escapado adentro de un string. El nombre y el
+#   link de cada producto SÍ vienen limpios en un <script type="application/ld+json">
+#   aparte. El bot junta ambas fuentes: saca precio/precio-lista de los
+#   chunks de next_f y el link del bloque ld+json, cruzando por nombre.
+#   Verificado en vivo: de 40 productos en una página, encontró 34 con
+#   descuento y pudo linkear 31. Trae TODO (sin filtrar perecibles, tal
+#   como se pidió), pero ¡ojo! cada página de Jumbo pesa ~4-4.5 MB — con
+#   97 páginas en total, no conviene recorrerlas todas cada pasada (sería
+#   varios cientos de MB de datos móviles). MAX_PAGINAS_JUMBO controla
+#   cuántas se revisan; súbelo si tienes WiFi ilimitado y quieres más
+#   cobertura, bájalo si te preocupan los datos móviles.
 # - AliExpress: NO agregado todavía. Tiene protección anti-bot fuerte
 #   (Cloudflare) y normalmente exige un navegador real, no pedidos HTTP
 #   simples. No es viable corriéndolo liviano en Termux; si se agrega,
@@ -155,14 +165,21 @@ MAX_PAGINAS_LIDER = 5
 # límite: esos siempre se avisan.
 MAX_ALERTAS_POR_CATEGORIA_POR_PASADA = 6
 DOMINIO_LIDER = "https://www.lider.cl"
-# MERCADOLIBRE (EXPERIMENTAL, ver nota de arriba). Usa la URL clásica de
-# listado (no la app nueva) para tener más chance de que el HTML venga
-# con los productos ya armados en vez de necesitar JavaScript.
+# MERCADOLIBRE — URL verificada con navegador real (ver nota de arriba).
 CATEGORIAS_MERCADOLIBRE = [
-    "https://listado.mercadolibre.cl/ofertas",
+    "https://www.mercadolibre.cl/ofertas",
 ]
 MAX_PAGINAS_MERCADOLIBRE = 3
 DOMINIO_MERCADOLIBRE = "https://www.mercadolibre.cl"
+# JUMBO — jumbo-ofertas trae TODO sin filtrar (comida, perecibles, etc.,
+# tal como se pidió), a diferencia de Líder que solo trae no-perecibles.
+# Cada página pesa ~4-4.5 MB (ver nota de arriba) — MAX_PAGINAS_JUMBO
+# controla cuántas de las 97 páginas totales se revisan por pasada.
+CATEGORIAS_JUMBO = [
+    "https://www.jumbo.cl/jumbo-ofertas",
+]
+MAX_PAGINAS_JUMBO = 8
+DOMINIO_JUMBO = "https://www.jumbo.cl"
 DESCUENTO_MINIMO_GRATIS = 30      # 30% a 49% -> canal gratis
 DESCUENTO_MINIMO_PREMIUM = 50     # 50% a 74% -> canal premium
 DESCUENTO_POSIBLE_ERROR = 75      # 75% o más -> premium con alerta de POSIBLE ERROR
@@ -753,17 +770,16 @@ def procesar_tarjeta_mercadolibre(tarjeta):
         "link": link
     }
 def buscar_ofertas_mercadolibre():
-    print("🔍 Buscando ofertas en MercadoLibre (experimental)...", flush=True)
+    print("🔍 Buscando ofertas en MercadoLibre...", flush=True)
     productos_por_link = {}
     ya_se_imprimieron_pistas = False
     for categoria in CATEGORIAS_MERCADOLIBRE:
         for numero_pagina in range(1, MAX_PAGINAS_MERCADOLIBRE + 1):
-            # Paginación clásica de ML: "_Desde_51", "_Desde_101"... (50 por página).
             if numero_pagina == 1:
                 url = categoria
             else:
-                desde = (numero_pagina - 1) * 50 + 1
-                url = f"{categoria.rstrip('/')}_Desde_{desde}"
+                separador = "&" if "?" in categoria else "?"
+                url = f"{categoria}{separador}page={numero_pagina}"
             try:
                 respuesta = pedir_pagina(url)
                 if respuesta is None:
@@ -802,6 +818,113 @@ def buscar_ofertas_mercadolibre():
                 break
             time.sleep(random.uniform(2, 4))
     print(f"   ✅ {len(productos_por_link)} producto(s) único(s) en MercadoLibre.", flush=True)
+    return list(productos_por_link.values())
+# ---------------------------------------------------------------------
+# LECTOR: JUMBO (jumbo-ofertas — ver nota grande al inicio del archivo)
+# ---------------------------------------------------------------------
+REGEX_LDJSON = re.compile(r'<script type="application/ld\+json">(.*?)</script>', re.S)
+REGEX_CHUNK_NEXT_F = re.compile(r'self\.__next_f\.push\(\[\d+,"((?:\\.|[^"\\])*)"\]\)')
+REGEX_PRODUCTO_JUMBO = re.compile(r'"price":(\d+),"listPrice":(\d+)((?:(?!"price").)*?)"name":"((?:[^"\\]|\\.)*)"', re.S)
+def extraer_mapa_nombre_url_jumbo(html):
+    """Lee los <script type="application/ld+json"> y arma un {nombre: url}."""
+    mapa = {}
+    for bloque in REGEX_LDJSON.findall(html):
+        try:
+            datos = json.loads(bloque)
+        except json.JSONDecodeError:
+            continue
+        for item in datos.get("itemListElement", []) or []:
+            nombre = item.get("name")
+            url = item.get("url")
+            if nombre and url:
+                mapa[nombre] = url
+    return mapa
+def extraer_productos_jumbo(html):
+    """
+    Los precios de Jumbo vienen repartidos en varios <script>self.__next_f.push([...])
+    (formato interno de Next.js), como JSON escapado dentro de un string.
+    Se desescapan todos los pedazos, se pegan, y se buscan los patrones
+    "price":X,"listPrice":Y...,"name":"..." adentro. Devuelve una lista
+    de (precio_oferta, precio_normal, nombre).
+    """
+    pedazos = []
+    for coincidencia in REGEX_CHUNK_NEXT_F.finditer(html):
+        try:
+            pedazos.append(json.loads('"' + coincidencia.group(1) + '"'))
+        except (json.JSONDecodeError, ValueError):
+            continue  # pedazo mal formado: se ignora, no se revienta el resto
+    texto_completo = "\n".join(pedazos)
+    productos = []
+    for m in REGEX_PRODUCTO_JUMBO.finditer(texto_completo):
+        try:
+            precio_oferta = int(m.group(1))
+            precio_normal = int(m.group(2))
+            nombre = json.loads('"' + m.group(4) + '"')
+        except (json.JSONDecodeError, ValueError):
+            continue
+        productos.append((precio_oferta, precio_normal, nombre))
+    return productos
+def buscar_ofertas_jumbo():
+    print("🔍 Buscando ofertas en Jumbo...", flush=True)
+    productos_por_link = {}
+    ya_se_imprimieron_pistas = False
+    for categoria in CATEGORIAS_JUMBO:
+        for numero_pagina in range(1, MAX_PAGINAS_JUMBO + 1):
+            if numero_pagina == 1:
+                url = categoria
+            else:
+                separador = "&" if "?" in categoria else "?"
+                url = f"{categoria}{separador}page={numero_pagina}"
+            try:
+                respuesta = pedir_pagina(url)
+                if respuesta is None:
+                    print(f"   ⚠️ No pude conectarme a Jumbo pág. {numero_pagina} después de varios intentos.", flush=True)
+                    break
+                if respuesta.status_code != 200:
+                    print(f"   ⚠️ No pude acceder a Jumbo pág. {numero_pagina}. Código: {respuesta.status_code}", flush=True)
+                    if not ya_se_imprimieron_pistas:
+                        imprimir_diagnostico_bloqueo(respuesta)
+                        ya_se_imprimieron_pistas = True
+                    break
+                mapa_url = extraer_mapa_nombre_url_jumbo(respuesta.text)
+                crudos = extraer_productos_jumbo(respuesta.text)
+                if not mapa_url and not crudos:
+                    print(f"   ⚠️ Jumbo pág. {numero_pagina}: no encontré ni el bloque ld+json ni los chunks de Next.js.", flush=True)
+                    if not ya_se_imprimieron_pistas:
+                        imprimir_pistas_pagina(respuesta.text)
+                        print(f"   🔬 Pistas Jumbo: ¿contiene 'application/ld+json'? -> {'application/ld+json' in respuesta.text} | ¿contiene 'self.__next_f.push'? -> {'self.__next_f.push' in respuesta.text}", flush=True)
+                        ya_se_imprimieron_pistas = True
+                    break
+                nuevos_en_esta_pagina = 0
+                sin_url = 0
+                for precio_oferta, precio_normal, nombre in crudos:
+                    if precio_oferta >= precio_normal or precio_normal == 0:
+                        continue
+                    link = mapa_url.get(nombre)
+                    if not link:
+                        sin_url += 1
+                        continue
+                    if link in productos_por_link:
+                        continue
+                    descuento = round((1 - (precio_oferta / precio_normal)) * 100)
+                    productos_por_link[link] = {
+                        "tienda": "Jumbo",
+                        "categoria": "General",
+                        "titulo": reparar_texto(nombre),
+                        "precio_oferta": precio_oferta,
+                        "precio_normal": precio_normal,
+                        "descuento": descuento,
+                        "link": link
+                    }
+                    nuevos_en_esta_pagina += 1
+                print(f"   📄 Jumbo pág. {numero_pagina}: {nuevos_en_esta_pagina} producto(s) nuevo(s) con descuento ({len(crudos)} con precio/precio-lista, {sin_url} sin link).", flush=True)
+                if len(crudos) == 0:
+                    break
+            except Exception as error:
+                print(f"   ⚠️ Error en Jumbo pág. {numero_pagina}: {error}", flush=True)
+                break
+            time.sleep(random.uniform(2, 4))
+    print(f"   ✅ {len(productos_por_link)} producto(s) único(s) en Jumbo.", flush=True)
     return list(productos_por_link.values())
 # ---------------------------------------------------------------------
 # LECTOR: DBS
@@ -996,6 +1119,8 @@ def hacer_una_pasada():
     todos_los_productos += buscar_ofertas_lider()
     time.sleep(3)
     todos_los_productos += buscar_ofertas_mercadolibre()
+    time.sleep(3)
+    todos_los_productos += buscar_ofertas_jumbo()
     print(f"\n📦 Total combinado: {len(todos_los_productos)} producto(s).\n", flush=True)
     historial = cargar_historial()
     candidatos = [p for p in todos_los_productos if califica_para_enviar(p, historial, lista_deseos)]
