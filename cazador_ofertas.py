@@ -75,7 +75,8 @@ except ImportError:
 # ---------------------------------------------------------------------
 # CONFIGURACIÓN GENERAL
 # ---------------------------------------------------------------------
-# Categorías de Falabella a vigilar (URLs con "/category/").
+# Categorías de Falabella a vigilar (URLs con "/category/"). Se agregaron
+# Moda-Mujer, Moda-Hombre y Smart-TV para que no sea puro Camas/Audio.
 CATEGORIAS_FALABELLA = [
     "https://www.falabella.com/falabella-cl/category/cat2018/Celulares-y-Telefonos",
     "https://www.falabella.com/falabella-cl/category/cat4830/Zapatillas",
@@ -83,14 +84,20 @@ CATEGORIAS_FALABELLA = [
     "https://www.falabella.com/falabella-cl/category/cat3205/Perfumes",
     "https://www.falabella.com/falabella-cl/category/cat3145/Camas",
     "https://www.falabella.com/falabella-cl/category/cat2032/Audio",
+    "https://www.falabella.com/falabella-cl/category/cat20002/Moda-Mujer",
+    "https://www.falabella.com/falabella-cl/category/cat1320008/Moda-Hombre",
+    "https://www.falabella.com/falabella-cl/category/cat7190148/Smart-TV",
 ]
 MAX_PAGINAS_FALABELLA = 5
 # Secciones de ofertas de Paris a vigilar (antes solo se leía "mujer").
+# Se agregaron deportes y belleza para sumar más variedad.
 # Para agregar más: paris.cl -> sección -> "Ofertas" y pega la URL aquí.
 URLS_OFERTAS_PARIS = [
     "https://www.paris.cl/mujer/ofertas/",
     "https://www.paris.cl/hombre/ofertas/",
     "https://www.paris.cl/tecnologia/ofertas/",
+    "https://www.paris.cl/deportes/ofertas/",
+    "https://www.paris.cl/belleza/ofertas/",
 ]
 MAX_PAGINAS_PARIS = 4
 DOMINIO_PARIS = "https://www.paris.cl"
@@ -133,12 +140,20 @@ PAGINAS_DBS = [
 # la que ya usabas). Si Lider agrega/cambia subcategorías, revisa el menú
 # de https://www.lider.cl/content/liquidacion-lider/95467052
 CATEGORIAS_LIDER = [
-    "https://www.lider.cl/browse/liquidacion-lider/electro/95467052_73455141",
-    "https://www.lider.cl/browse/liquidacion-lider/electro/electrohogar/95467052_73455141_77393875",
-    "https://www.lider.cl/browse/liquidacion-lider/electro/linea-blanca/95467052_73455141_43302143",
-    "https://www.lider.cl/browse/liquidacion-lider/muebles/95467052_15955368",
+    ("Electro", "https://www.lider.cl/browse/liquidacion-lider/electro/95467052_73455141"),
+    ("Electrohogar", "https://www.lider.cl/browse/liquidacion-lider/electro/electrohogar/95467052_73455141_77393875"),
+    ("Linea-Blanca", "https://www.lider.cl/browse/liquidacion-lider/electro/linea-blanca/95467052_73455141_43302143"),
+    ("Muebles", "https://www.lider.cl/browse/liquidacion-lider/muebles/95467052_15955368"),
 ]
 MAX_PAGINAS_LIDER = 5
+# Cuántas alertas como máximo se mandan POR CATEGORÍA en cada pasada (ej:
+# como mucho 6 camas, 6 refrigeradores, 6 poleras...). Esto evita que una
+# categoría con muchísimo stock en oferta (como Camas o Línea Blanca)
+# tape a las demás. Se manda primero lo de mejor descuento dentro de cada
+# categoría; lo que se queda fuera no se pierde, se vuelve a evaluar en
+# la próxima pasada. Los productos de tu lista_deseos.txt NO tienen este
+# límite: esos siempre se avisan.
+MAX_ALERTAS_POR_CATEGORIA_POR_PASADA = 6
 DOMINIO_LIDER = "https://www.lider.cl"
 # MERCADOLIBRE (EXPERIMENTAL, ver nota de arriba). Usa la URL clásica de
 # listado (no la app nueva) para tener más chance de que el HTML venga
@@ -336,6 +351,7 @@ def buscar_ofertas_falabella():
                 descuento = round((1 - (precio_oferta / precio_normal)) * 100)
                 productos_por_link[link] = {
                     "tienda": "Falabella",
+                    "categoria": nombre_corto,
                     "titulo": titulo,
                     "precio_oferta": precio_oferta,
                     "precio_normal": precio_normal,
@@ -355,7 +371,7 @@ def buscar_ofertas_falabella():
 def limpiar_precio_paris(texto):
     texto = texto.replace("$", "").replace(".", "").strip()
     return int(texto) if texto.isdigit() else None
-def procesar_tarjetas_paris(tarjetas, productos_por_link):
+def procesar_tarjetas_paris(tarjetas, productos_por_link, nombre_corto):
     """Convierte tarjetas de producto de Paris en diccionarios. Devuelve cuántas eran nuevas."""
     nuevos = 0
     for tarjeta in tarjetas:
@@ -399,6 +415,7 @@ def procesar_tarjetas_paris(tarjetas, productos_por_link):
             continue
         productos_por_link[link] = {
             "tienda": "Paris",
+            "categoria": nombre_corto,
             "titulo": titulo,
             "precio_oferta": precio_oferta,
             "precio_normal": precio_normal,
@@ -439,7 +456,7 @@ def buscar_ofertas_paris():
                     ya_se_imprimieron_pistas = True
                 break
             antes = len(productos_por_link)
-            nuevos_en_esta_pagina = procesar_tarjetas_paris(tarjetas, productos_por_link)
+            nuevos_en_esta_pagina = procesar_tarjetas_paris(tarjetas, productos_por_link, nombre_corto)
             print(f"   📄 {nombre_corto} pág. {numero_pagina}: {nuevos_en_esta_pagina} producto(s) nuevo(s) con descuento ({len(tarjetas)} tarjetas en la página).", flush=True)
             if numero_pagina > 1 and len(productos_por_link) == antes:
                 # "?page=" probablemente no le hace nada a esta sección: no seguimos gastando pedidos.
@@ -454,14 +471,13 @@ def buscar_ofertas_lider():
     print("🔍 Buscando ofertas en Lider...", flush=True)
     productos_por_link = {}
     ya_se_imprimieron_pistas = False
-    for categoria in CATEGORIAS_LIDER:
-        nombre_corto = categoria.rstrip("/").split("/")[-1]
+    for nombre_corto, categoria_url in CATEGORIAS_LIDER:
         for numero_pagina in range(1, MAX_PAGINAS_LIDER + 1):
             if numero_pagina == 1:
-                url = categoria
+                url = categoria_url
             else:
-                separador = "&" if "?" in categoria else "?"
-                url = f"{categoria}{separador}page={numero_pagina}"
+                separador = "&" if "?" in categoria_url else "?"
+                url = f"{categoria_url}{separador}page={numero_pagina}"
             try:
                 respuesta = pedir_pagina(url)
                 if respuesta is None:
@@ -513,6 +529,7 @@ def buscar_ofertas_lider():
                             continue
                         productos_por_link[link] = {
                             "tienda": "Lider",
+                            "categoria": nombre_corto,
                             "titulo": titulo,
                             "precio_oferta": precio_oferta,
                             "precio_normal": precio_normal,
@@ -663,6 +680,7 @@ def buscar_ofertas_easy():
                         continue
                     productos_por_link[link] = {
                         "tienda": "Easy",
+                        "categoria": f"cluster-{nombre_corto}",
                         "titulo": titulo,
                         "precio_oferta": precio_oferta,
                         "precio_normal": precio_normal,
@@ -727,6 +745,7 @@ def procesar_tarjeta_mercadolibre(tarjeta):
     descuento = round((1 - (precio_oferta / precio_normal)) * 100)
     return {
         "tienda": "MercadoLibre",
+        "categoria": "General",
         "titulo": titulo,
         "precio_oferta": precio_oferta,
         "precio_normal": precio_normal,
@@ -811,6 +830,7 @@ def procesar_tarjeta_dbs(tarjeta):
     descuento = round((1 - (precio_oferta / precio_normal)) * 100)
     return {
         "tienda": "DBS",
+        "categoria": "General",
         "titulo": titulo,
         "precio_oferta": precio_oferta,
         "precio_normal": precio_normal,
@@ -904,31 +924,59 @@ def enviar_alerta_telegram(datos, chat_id, es_premium):
 # ---------------------------------------------------------------------
 # LÓGICA PRINCIPAL
 # ---------------------------------------------------------------------
-def procesar_producto(producto, historial, lista_deseos):
+def califica_para_enviar(producto, historial, lista_deseos):
+    """
+    Decide si un producto merece avisarse (nuevo, o bajó de precio de nuevo).
+    NO envía nada todavía — solo evalúa. De paso marca producto["deseo"].
+    """
     descuento = producto["descuento"]
     link = producto["link"]
     deseo = buscar_deseo(producto["titulo"], lista_deseos) if lista_deseos else None
     producto["deseo"] = deseo
     umbral = DESCUENTO_MINIMO_DESEOS if deseo else DESCUENTO_MINIMO_GRATIS
     if descuento < umbral:
-        return historial
-    es_premium = descuento >= DESCUENTO_MINIMO_PREMIUM
-    chat_id = TELEGRAM_CHAT_ID_PREMIUM if es_premium else TELEGRAM_CHAT_ID_GRATIS
+        return False
     registro_anterior = historial.get(link)
     if registro_anterior is None:
-        marca_deseo = " 🎯" if deseo else ""
-        print(f"🆕 Nuevo{marca_deseo} [{producto['tienda']}]: {producto['titulo']} ({descuento}%)", flush=True)
-        se_envio = enviar_alerta_telegram(producto, chat_id, es_premium)
-        if se_envio:
-            historial[link] = {"precio_oferta": producto["precio_oferta"], "canal": "premium" if es_premium else "gratis"}
-        time.sleep(SEGUNDOS_ENTRE_MENSAJES)
-    elif producto["precio_oferta"] < registro_anterior["precio_oferta"]:
-        print(f"📉 Bajó más [{producto['tienda']}]: {producto['titulo']} ({descuento}%)", flush=True)
-        se_envio = enviar_alerta_telegram(producto, chat_id, es_premium)
-        if se_envio:
-            historial[link] = {"precio_oferta": producto["precio_oferta"], "canal": "premium" if es_premium else "gratis"}
-        time.sleep(SEGUNDOS_ENTRE_MENSAJES)
-    return historial
+        return True
+    if producto["precio_oferta"] < registro_anterior["precio_oferta"]:
+        return True
+    return False
+def enviar_producto(producto, historial):
+    """Manda la alerta a Telegram y, si se pudo, deja registro en el historial."""
+    descuento = producto["descuento"]
+    es_premium = descuento >= DESCUENTO_MINIMO_PREMIUM
+    chat_id = TELEGRAM_CHAT_ID_PREMIUM if es_premium else TELEGRAM_CHAT_ID_GRATIS
+    marca_deseo = " 🎯" if producto.get("deseo") else ""
+    print(f"🆕 Enviando{marca_deseo} [{producto['tienda']}/{producto.get('categoria', 'General')}]: {producto['titulo']} ({descuento}%)", flush=True)
+    se_envio = enviar_alerta_telegram(producto, chat_id, es_premium)
+    if se_envio:
+        historial[producto["link"]] = {"precio_oferta": producto["precio_oferta"], "canal": "premium" if es_premium else "gratis"}
+    time.sleep(SEGUNDOS_ENTRE_MENSAJES)
+    return se_envio
+def repartir_cupo_por_categoria(candidatos):
+    """
+    Agrupa los candidatos por (tienda, categoria) y deja pasar como mucho
+    MAX_ALERTAS_POR_CATEGORIA_POR_PASADA de cada grupo, priorizando el
+    mayor descuento. Así ninguna categoría (ej: Camas) tapa a las demás.
+    Los productos de la lista de deseos se saltan el límite: siempre pasan.
+    """
+    con_deseo = [p for p in candidatos if p.get("deseo")]
+    sin_deseo = [p for p in candidatos if not p.get("deseo")]
+    grupos = {}
+    for producto in sin_deseo:
+        clave = (producto["tienda"], producto.get("categoria", "General"))
+        grupos.setdefault(clave, []).append(producto)
+    seleccionados = list(con_deseo)
+    for (tienda, categoria), productos_grupo in grupos.items():
+        productos_grupo.sort(key=lambda p: p["descuento"], reverse=True)
+        elegidos = productos_grupo[:MAX_ALERTAS_POR_CATEGORIA_POR_PASADA]
+        seleccionados.extend(elegidos)
+        sobrantes = len(productos_grupo) - len(elegidos)
+        if sobrantes > 0:
+            print(f"   ⏸️ {tienda}/{categoria}: {sobrantes} oferta(s) más quedan en cola para la próxima pasada (cupo de {MAX_ALERTAS_POR_CATEGORIA_POR_PASADA} lleno).", flush=True)
+    random.shuffle(seleccionados)  # para que el canal no salga "10 camas seguidas"
+    return seleccionados
 def hacer_una_pasada():
     """Una pasada completa: busca en todas las tiendas activas y envía lo nuevo."""
     lista_deseos = cargar_lista_deseos()
@@ -950,14 +998,15 @@ def hacer_una_pasada():
     todos_los_productos += buscar_ofertas_mercadolibre()
     print(f"\n📦 Total combinado: {len(todos_los_productos)} producto(s).\n", flush=True)
     historial = cargar_historial()
+    candidatos = [p for p in todos_los_productos if califica_para_enviar(p, historial, lista_deseos)]
+    print(f"🔎 {len(candidatos)} producto(s) califican para avisar (antes de repartir el cupo por categoría).", flush=True)
+    a_enviar = repartir_cupo_por_categoria(candidatos)
     enviados = 0
-    for producto in todos_los_productos:
-        antes = len(historial)
-        historial = procesar_producto(producto, historial, lista_deseos)
-        if len(historial) > antes:
+    for producto in a_enviar:
+        if enviar_producto(producto, historial):
             enviados += 1
             guardar_historial(historial)
-    print(f"\n✅ Pasada lista. Se enviaron {enviados} alerta(s) nueva(s).", flush=True)
+    print(f"\n✅ Pasada lista. Se enviaron {enviados} alerta(s) de {len(candidatos)} que calificaban.", flush=True)
 def activar_candado_energia():
     """En Termux, evita que Android duerma el proceso con la pantalla apagada."""
     try:
