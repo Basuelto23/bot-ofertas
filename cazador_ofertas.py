@@ -21,6 +21,24 @@
 #   subcategorías Y varias páginas por subcategoría (antes solo leía la
 #   primera página de una sola subcategoría, así que se perdía la mayoría
 #   de los productos en liquidación).
+# - Paris: ahora recorre 3 secciones de ofertas (mujer/hombre/tecnología)
+#   con paginación, en vez de solo "mujer" y una sola página.
+# - Easy: ahora pagina cada cluster en vez de leer solo la primera página.
+# - MercadoLibre: agregado como EXPERIMENTAL. No se pudo probar de
+#   antemano (mercadolibre.cl bloquea las herramientas de investigación),
+#   así que puede que el selector de HTML no calce a la primera. Si sale
+#   con 0 productos siempre, revisa los "🔬 Pistas" que imprime y avisa
+#   para ajustar los selectores.
+# - Jumbo: NO agregado todavía. jumbo.cl/jumbo-ofertas (3.871 productos,
+#   97 páginas) carga los datos con JavaScript del lado del cliente, no
+#   vienen en el HTML inicial como en Falabella/Lider. Necesita either
+#   encontrar el endpoint interno que llama esa página (con DevTools) o
+#   un navegador real (Playwright) para renderizarla. Pendiente.
+# - AliExpress: NO agregado todavía. Tiene protección anti-bot fuerte
+#   (Cloudflare) y normalmente exige un navegador real, no pedidos HTTP
+#   simples. No es viable corriéndolo liviano en Termux; si se agrega,
+#   debería ser aparte (ej: en la nube con Playwright), no en el bucle
+#   del celular.
 import requests
 import json
 import os
@@ -66,8 +84,15 @@ CATEGORIAS_FALABELLA = [
     "https://www.falabella.com/falabella-cl/category/cat3145/Camas",
     "https://www.falabella.com/falabella-cl/category/cat2032/Audio",
 ]
-MAX_PAGINAS_FALABELLA = 3
-URL_OFERTAS_PARIS = "https://www.paris.cl/mujer/ofertas/"
+MAX_PAGINAS_FALABELLA = 5
+# Secciones de ofertas de Paris a vigilar (antes solo se leía "mujer").
+# Para agregar más: paris.cl -> sección -> "Ofertas" y pega la URL aquí.
+URLS_OFERTAS_PARIS = [
+    "https://www.paris.cl/mujer/ofertas/",
+    "https://www.paris.cl/hombre/ofertas/",
+    "https://www.paris.cl/tecnologia/ofertas/",
+]
+MAX_PAGINAS_PARIS = 4
 DOMINIO_PARIS = "https://www.paris.cl"
 # Las categorias "outlet" de Ripley (PAUSADO)
 CATEGORIAS_RIPLEY = [
@@ -93,6 +118,7 @@ CLUSTERS_OFERTAS_EASY = [
     "https://www.easy.cl/cluster/1582",
     "https://www.easy.cl/cluster/5359",
 ]
+MAX_PAGINAS_EASY = 3
 # Las 4 paginas de ofertas de DBS
 PAGINAS_DBS = [
     "https://dbs.cl/sale",
@@ -112,8 +138,16 @@ CATEGORIAS_LIDER = [
     "https://www.lider.cl/browse/liquidacion-lider/electro/linea-blanca/95467052_73455141_43302143",
     "https://www.lider.cl/browse/liquidacion-lider/muebles/95467052_15955368",
 ]
-MAX_PAGINAS_LIDER = 3
+MAX_PAGINAS_LIDER = 5
 DOMINIO_LIDER = "https://www.lider.cl"
+# MERCADOLIBRE (EXPERIMENTAL, ver nota de arriba). Usa la URL clásica de
+# listado (no la app nueva) para tener más chance de que el HTML venga
+# con los productos ya armados en vez de necesitar JavaScript.
+CATEGORIAS_MERCADOLIBRE = [
+    "https://listado.mercadolibre.cl/ofertas",
+]
+MAX_PAGINAS_MERCADOLIBRE = 3
+DOMINIO_MERCADOLIBRE = "https://www.mercadolibre.cl"
 DESCUENTO_MINIMO_GRATIS = 30      # 30% a 49% -> canal gratis
 DESCUENTO_MINIMO_PREMIUM = 50     # 50% a 74% -> canal premium
 DESCUENTO_POSIBLE_ERROR = 75      # 75% o más -> premium con alerta de POSIBLE ERROR
@@ -321,20 +355,9 @@ def buscar_ofertas_falabella():
 def limpiar_precio_paris(texto):
     texto = texto.replace("$", "").replace(".", "").strip()
     return int(texto) if texto.isdigit() else None
-def buscar_ofertas_paris():
-    print("🔍 Buscando ofertas en Paris...", flush=True)
-    respuesta = pedir_pagina(URL_OFERTAS_PARIS)
-    if respuesta is None:
-        print("   ❌ No pude conectarme a Paris después de varios intentos.", flush=True)
-        return []
-    respuesta.encoding = "utf-8"
-    if respuesta.status_code != 200:
-        print(f"   ❌ No pude acceder a Paris. Código: {respuesta.status_code}", flush=True)
-        imprimir_diagnostico_bloqueo(respuesta)
-        return []
-    sopa = BeautifulSoup(respuesta.text, "lxml")
-    tarjetas = sopa.find_all("a", id=lambda v: v and v.startswith("product-"))
-    productos_por_link = {}
+def procesar_tarjetas_paris(tarjetas, productos_por_link):
+    """Convierte tarjetas de producto de Paris en diccionarios. Devuelve cuántas eran nuevas."""
+    nuevos = 0
     for tarjeta in tarjetas:
         link = tarjeta.get("href")
         if not link:
@@ -382,6 +405,46 @@ def buscar_ofertas_paris():
             "descuento": descuento,
             "link": link
         }
+        nuevos += 1
+    return nuevos
+def buscar_ofertas_paris():
+    print("🔍 Buscando ofertas en Paris...", flush=True)
+    productos_por_link = {}
+    ya_se_imprimieron_pistas = False
+    for seccion in URLS_OFERTAS_PARIS:
+        nombre_corto = seccion.rstrip("/").split("/")[-2] if seccion.rstrip("/").split("/")[-1] == "ofertas" else seccion.rstrip("/").split("/")[-1]
+        for numero_pagina in range(1, MAX_PAGINAS_PARIS + 1):
+            if numero_pagina == 1:
+                url = seccion
+            else:
+                separador = "&" if "?" in seccion else "?"
+                url = f"{seccion}{separador}page={numero_pagina}"
+            respuesta = pedir_pagina(url)
+            if respuesta is None:
+                print(f"   ⚠️ No pude conectarme a {nombre_corto} pág. {numero_pagina}.", flush=True)
+                break
+            respuesta.encoding = "utf-8"
+            if respuesta.status_code != 200:
+                print(f"   ⚠️ {nombre_corto} pág. {numero_pagina} respondió código {respuesta.status_code}.", flush=True)
+                if not ya_se_imprimieron_pistas:
+                    imprimir_diagnostico_bloqueo(respuesta)
+                    ya_se_imprimieron_pistas = True
+                break
+            sopa = BeautifulSoup(respuesta.text, "lxml")
+            tarjetas = sopa.find_all("a", id=lambda v: v and v.startswith("product-"))
+            if not tarjetas:
+                print(f"   ⚠️ {nombre_corto} pág. {numero_pagina}: 0 tarjetas de producto.", flush=True)
+                if not ya_se_imprimieron_pistas:
+                    imprimir_pistas_pagina(respuesta.text)
+                    ya_se_imprimieron_pistas = True
+                break
+            antes = len(productos_por_link)
+            nuevos_en_esta_pagina = procesar_tarjetas_paris(tarjetas, productos_por_link)
+            print(f"   📄 {nombre_corto} pág. {numero_pagina}: {nuevos_en_esta_pagina} producto(s) nuevo(s) con descuento ({len(tarjetas)} tarjetas en la página).", flush=True)
+            if numero_pagina > 1 and len(productos_por_link) == antes:
+                # "?page=" probablemente no le hace nada a esta sección: no seguimos gastando pedidos.
+                break
+            time.sleep(random.uniform(2, 4))
     print(f"   ✅ {len(productos_por_link)} producto(s) único(s) en Paris.", flush=True)
     return list(productos_por_link.values())
 # ---------------------------------------------------------------------
@@ -548,57 +611,178 @@ def buscar_ofertas_easy():
     productos_por_link = {}
     ya_se_imprimieron_pistas = False
     for categoria in CLUSTERS_OFERTAS_EASY:
-        try:
-            respuesta = pedir_pagina(categoria)
-            if respuesta is None:
-                print(f"   ⚠️ No pude conectarme a {categoria} después de varios intentos.", flush=True)
-                continue
-            if respuesta.status_code != 200:
-                print(f"   ⚠️ No pude acceder a {categoria}. Código: {respuesta.status_code}", flush=True)
-                if not ya_se_imprimieron_pistas:
-                    imprimir_diagnostico_bloqueo(respuesta)
-                    ya_se_imprimieron_pistas = True
-                continue
-            datos = extraer_bloque_next_data(respuesta.text)
-            if not datos:
-                print(f"   ⚠️ No encontré datos en {categoria}", flush=True)
-                if not ya_se_imprimieron_pistas:
-                    imprimir_pistas_pagina(respuesta.text)
-                    ya_se_imprimieron_pistas = True
-                continue
-            productos_crudos = (
-                datos.get("props", {})
-                .get("pageProps", {})
-                .get("serverProductsResponse", {})
-                .get("productList", [])
-            )
-            for producto in productos_crudos:
-                titulo = producto.get("productName")
-                link_texto = producto.get("linkText")
-                precios = producto.get("prices", {})
-                precio_normal = precios.get("normalPrice")
-                precio_oferta = precios.get("offerPrice")
-                if not titulo or not link_texto or not precio_normal or not precio_oferta:
-                    continue
-                if precio_oferta >= precio_normal:
-                    continue
-                titulo = reparar_texto(titulo)
-                link = f"https://www.easy.cl/{link_texto}"
-                descuento = round((1 - (precio_oferta / precio_normal)) * 100)
-                if link in productos_por_link:
-                    continue
-                productos_por_link[link] = {
-                    "tienda": "Easy",
-                    "titulo": titulo,
-                    "precio_oferta": precio_oferta,
-                    "precio_normal": precio_normal,
-                    "descuento": descuento,
-                    "link": link
-                }
-        except Exception as error:
-            print(f"   ⚠️ Error en {categoria}: {error}", flush=True)
-        time.sleep(random.uniform(2, 4))
+        nombre_corto = categoria.rstrip("/").split("/")[-1]
+        for numero_pagina in range(1, MAX_PAGINAS_EASY + 1):
+            if numero_pagina == 1:
+                url = categoria
+            else:
+                separador = "&" if "?" in categoria else "?"
+                url = f"{categoria}{separador}page={numero_pagina}"
+            try:
+                respuesta = pedir_pagina(url)
+                if respuesta is None:
+                    print(f"   ⚠️ No pude conectarme a cluster {nombre_corto} pág. {numero_pagina} después de varios intentos.", flush=True)
+                    break
+                if respuesta.status_code != 200:
+                    print(f"   ⚠️ No pude acceder a cluster {nombre_corto} pág. {numero_pagina}. Código: {respuesta.status_code}", flush=True)
+                    if not ya_se_imprimieron_pistas:
+                        imprimir_diagnostico_bloqueo(respuesta)
+                        ya_se_imprimieron_pistas = True
+                    break
+                datos = extraer_bloque_next_data(respuesta.text)
+                if not datos:
+                    print(f"   ⚠️ No encontré datos en cluster {nombre_corto} pág. {numero_pagina}", flush=True)
+                    if not ya_se_imprimieron_pistas:
+                        imprimir_pistas_pagina(respuesta.text)
+                        ya_se_imprimieron_pistas = True
+                    break
+                productos_crudos = (
+                    datos.get("props", {})
+                    .get("pageProps", {})
+                    .get("serverProductsResponse", {})
+                    .get("productList", [])
+                )
+                if not productos_crudos:
+                    print(f"   ⚠️ Cluster {nombre_corto} pág. {numero_pagina} venía sin productos.", flush=True)
+                    break
+                nuevos_en_esta_pagina = 0
+                for producto in productos_crudos:
+                    titulo = producto.get("productName")
+                    link_texto = producto.get("linkText")
+                    precios = producto.get("prices", {})
+                    precio_normal = precios.get("normalPrice")
+                    precio_oferta = precios.get("offerPrice")
+                    if not titulo or not link_texto or not precio_normal or not precio_oferta:
+                        continue
+                    if precio_oferta >= precio_normal:
+                        continue
+                    titulo = reparar_texto(titulo)
+                    link = f"https://www.easy.cl/{link_texto}"
+                    descuento = round((1 - (precio_oferta / precio_normal)) * 100)
+                    if link in productos_por_link:
+                        continue
+                    productos_por_link[link] = {
+                        "tienda": "Easy",
+                        "titulo": titulo,
+                        "precio_oferta": precio_oferta,
+                        "precio_normal": precio_normal,
+                        "descuento": descuento,
+                        "link": link
+                    }
+                    nuevos_en_esta_pagina += 1
+                print(f"   📄 Cluster {nombre_corto} pág. {numero_pagina}: {nuevos_en_esta_pagina} producto(s) nuevo(s) con descuento ({len(productos_crudos)} en la página).", flush=True)
+                if numero_pagina > 1 and nuevos_en_esta_pagina == 0:
+                    # "?page=" probablemente no le hace nada a este cluster: no seguimos gastando pedidos.
+                    break
+            except Exception as error:
+                print(f"   ⚠️ Error en cluster {nombre_corto} pág. {numero_pagina}: {error}", flush=True)
+                break
+            time.sleep(random.uniform(2, 4))
     print(f"   ✅ {len(productos_por_link)} producto(s) único(s) en Easy.", flush=True)
+    return list(productos_por_link.values())
+# ---------------------------------------------------------------------
+# LECTOR: MERCADOLIBRE (EXPERIMENTAL — ver notas al inicio del archivo)
+# ---------------------------------------------------------------------
+def limpiar_precio_mercadolibre(texto):
+    texto = re.sub(r"[^0-9]", "", texto or "")
+    return int(texto) if texto else None
+def procesar_tarjeta_mercadolibre(tarjeta):
+    # ML ha rediseñado sus tarjetas de producto varias veces ("poly-card"
+    # es el diseño más nuevo, "ui-search-result" el clásico). Probamos
+    # ambos vocabularios de clases para no depender de uno solo.
+    enlace = tarjeta.find("a", class_=lambda c: c and ("poly-component__title" in c or "ui-search-link" in c or "ui-search-item__title" in c))
+    if not enlace:
+        enlace = tarjeta.find("a", href=True)
+    if not enlace or not enlace.get("href"):
+        return None
+    link = enlace["href"].split("#")[0]
+    titulo = reparar_texto(enlace.get_text(strip=True))
+    if not titulo:
+        titulo_tag = tarjeta.find(class_=lambda c: c and "title" in c)
+        titulo = reparar_texto(titulo_tag.get_text(strip=True)) if titulo_tag else None
+    if not titulo:
+        return None
+    precio_normal = None
+    precio_oferta = None
+    # Precio tachado (normal): suele venir dentro de <s> o con "previous" en la clase.
+    tachado = tarjeta.find(["s", "del"])
+    if not tachado:
+        tachado = tarjeta.find(class_=lambda c: c and "previous" in c)
+    if tachado:
+        fraccion = tachado.find(class_=lambda c: c and "andes-money-amount__fraction" in c)
+        precio_normal = limpiar_precio_mercadolibre(fraccion.get_text() if fraccion else tachado.get_text())
+    # Todas las fracciones de precio en la tarjeta; la que no está tachada es la oferta.
+    fracciones = tarjeta.find_all(class_=lambda c: c and "andes-money-amount__fraction" in c)
+    for fraccion in fracciones:
+        if tachado and fraccion in tachado.find_all(class_=lambda c: c and "andes-money-amount__fraction" in c):
+            continue
+        valor = limpiar_precio_mercadolibre(fraccion.get_text())
+        if valor:
+            precio_oferta = valor
+            break
+    if not precio_normal or not precio_oferta or precio_oferta >= precio_normal:
+        return None
+    if link.startswith("/"):
+        link = DOMINIO_MERCADOLIBRE + link
+    descuento = round((1 - (precio_oferta / precio_normal)) * 100)
+    return {
+        "tienda": "MercadoLibre",
+        "titulo": titulo,
+        "precio_oferta": precio_oferta,
+        "precio_normal": precio_normal,
+        "descuento": descuento,
+        "link": link
+    }
+def buscar_ofertas_mercadolibre():
+    print("🔍 Buscando ofertas en MercadoLibre (experimental)...", flush=True)
+    productos_por_link = {}
+    ya_se_imprimieron_pistas = False
+    for categoria in CATEGORIAS_MERCADOLIBRE:
+        for numero_pagina in range(1, MAX_PAGINAS_MERCADOLIBRE + 1):
+            # Paginación clásica de ML: "_Desde_51", "_Desde_101"... (50 por página).
+            if numero_pagina == 1:
+                url = categoria
+            else:
+                desde = (numero_pagina - 1) * 50 + 1
+                url = f"{categoria.rstrip('/')}_Desde_{desde}"
+            try:
+                respuesta = pedir_pagina(url)
+                if respuesta is None:
+                    print(f"   ⚠️ No pude conectarme a MercadoLibre pág. {numero_pagina} después de varios intentos.", flush=True)
+                    break
+                if respuesta.status_code != 200:
+                    print(f"   ⚠️ No pude acceder a MercadoLibre pág. {numero_pagina}. Código: {respuesta.status_code}", flush=True)
+                    if not ya_se_imprimieron_pistas:
+                        imprimir_diagnostico_bloqueo(respuesta)
+                        ya_se_imprimieron_pistas = True
+                    break
+                sopa = BeautifulSoup(respuesta.text, "lxml")
+                tarjetas = sopa.find_all(class_=lambda c: c and ("poly-card" in c or "ui-search-result__wrapper" in c))
+                if not tarjetas:
+                    print(f"   ⚠️ MercadoLibre pág. {numero_pagina}: 0 tarjetas encontradas con los selectores actuales.", flush=True)
+                    if not ya_se_imprimieron_pistas:
+                        imprimir_pistas_pagina(respuesta.text)
+                        print(f"   🔬 Pistas ML: ¿contiene 'poly-card'? -> {'poly-card' in respuesta.text} | ¿contiene 'ui-search-result'? -> {'ui-search-result' in respuesta.text}", flush=True)
+                        ya_se_imprimieron_pistas = True
+                    break
+                nuevos_en_esta_pagina = 0
+                for tarjeta in tarjetas:
+                    try:
+                        producto = procesar_tarjeta_mercadolibre(tarjeta)
+                    except Exception:
+                        producto = None
+                    if not producto or producto["link"] in productos_por_link:
+                        continue
+                    productos_por_link[producto["link"]] = producto
+                    nuevos_en_esta_pagina += 1
+                print(f"   📄 MercadoLibre pág. {numero_pagina}: {nuevos_en_esta_pagina} producto(s) nuevo(s) con descuento ({len(tarjetas)} tarjetas en la página).", flush=True)
+                if numero_pagina > 1 and nuevos_en_esta_pagina == 0:
+                    break
+            except Exception as error:
+                print(f"   ⚠️ Error en MercadoLibre pág. {numero_pagina}: {error}", flush=True)
+                break
+            time.sleep(random.uniform(2, 4))
+    print(f"   ✅ {len(productos_por_link)} producto(s) único(s) en MercadoLibre.", flush=True)
     return list(productos_por_link.values())
 # ---------------------------------------------------------------------
 # LECTOR: DBS
@@ -762,6 +946,8 @@ def hacer_una_pasada():
     todos_los_productos += buscar_ofertas_easy()
     time.sleep(3)
     todos_los_productos += buscar_ofertas_lider()
+    time.sleep(3)
+    todos_los_productos += buscar_ofertas_mercadolibre()
     print(f"\n📦 Total combinado: {len(todos_los_productos)} producto(s).\n", flush=True)
     historial = cargar_historial()
     enviados = 0
