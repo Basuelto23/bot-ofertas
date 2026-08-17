@@ -68,6 +68,20 @@
 #      recién al final lo reemplaza) y si igual encuentra un historial
 #      corrupto, lo respalda como .corrupto y sigue con uno nuevo en vez
 #      de crashear cada pasada.
+# - ARREGLO 2 de "manda las mismas ofertas" (confirmado en vivo el
+#   17-ago con capturas de Ofertas Chile Premium: la misma cama elástica
+#   de Paris se mandó 3 veces en menos de un minuto, con una sola copia
+#   del bot corriendo): el mismo problema de link volátil del punto (1)
+#   también pasa en PARIS (y potencialmente cualquier tienda) — un mismo
+#   producto puede aparecer en más de una sección/página con un link que
+#   trae un parámetro de posición/tracking distinto cada vez, así que
+#   parecía "otro producto" y se mandaba de nuevo, TODO dentro de la
+#   misma pasada. Se creó una función compartida normalizar_link() que
+#   saca el "?..." de la URL, y se aplicó a TODAS las tiendas (Falabella,
+#   Paris, Lider, MercadoLibre, Jumbo, DBS), no solo a MercadoLibre.
+#   También se hizo el candado de PID (punto 2 de arriba) atómico de
+#   verdad (antes tenía una ventanita de carrera si dos procesos
+#   arrancaban justo al mismo tiempo).
 import requests
 import json
 import os
@@ -86,7 +100,7 @@ MODO = sys.argv[1].lower() if len(sys.argv) > 1 else "todas"
 if MODO not in ("nube", "local", "todas", "bucle"):
     print(f"⚠️ El modo '{MODO}' no existe. Opciones: nube, local, todas, bucle. Usaré 'todas'.", flush=True)
     MODO = "todas"
-MINUTOS_ENTRE_PASADAS = 30  # espera del modo bucle entre pasada y pasada
+MINUTOS_ENTRE_PASADAS = 15  # espera del modo bucle entre pasada y pasada
 # ---------------------------------------------------------------------
 # CREDENCIALES DE TELEGRAM
 # ---------------------------------------------------------------------
@@ -242,6 +256,20 @@ def reparar_texto(texto):
         return texto
 def formatear_precio(numero):
     return f"{numero:,}".replace(",", ".")
+def normalizar_link(url):
+    """
+    Quita el fragmento (#...) y los parámetros de la URL (?...) de un link
+    de producto. Varias tiendas (MercadoLibre, y según vimos también
+    Paris) agregan parámetros de tracking/posición que CAMBIAN aunque sea
+    el mismo producto, incluso dentro de la MISMA pasada si el producto
+    aparece en más de una sección o página. Como el historial usa el link
+    como llave para no repetir ofertas, un link que cambia solo hace que
+    el mismo producto se mande varias veces. Nos quedamos solo con la
+    parte "de verdad" de la URL (antes del "?").
+    """
+    if not url:
+        return url
+    return url.split("#")[0].split("?")[0]
 def normalizar(texto):
     """Minúsculas y sin tildes, para comparar sin dramas."""
     texto = texto.lower()
@@ -397,7 +425,7 @@ def buscar_ofertas_falabella():
                 titulo = producto.get("displayName")
                 if titulo:
                     titulo = reparar_texto(titulo)
-                link = producto.get("url")
+                link = normalizar_link(producto.get("url"))
                 precio_oferta = extraer_precio_falabella(producto, "internetPrice")
                 precio_normal = extraer_precio_falabella(producto, "normalPrice")
                 if not titulo or not link or not precio_oferta or not precio_normal or precio_normal == 0:
@@ -438,6 +466,12 @@ def procesar_tarjetas_paris(tarjetas, productos_por_link, nombre_corto):
             continue
         if link.startswith("/"):
             link = DOMINIO_PARIS + link
+        # Paris agrega parámetros de tracking al link (ej: posición del
+        # producto en la grilla) que cambian aunque sea el MISMO producto,
+        # incluso si aparece en dos secciones/páginas distintas dentro de
+        # la misma pasada. Sin esto, el mismo colchón/cama podía colarse
+        # 2-3 veces con links "distintos" y mandarse repetido.
+        link = normalizar_link(link)
         spans_titulo = tarjeta.find_all(
             lambda tag: tag.name == "span" and tag.get("class") and
             any("line-clamp" in c for c in tag.get("class"))
@@ -582,6 +616,7 @@ def buscar_ofertas_lider():
                             continue
                         titulo = reparar_texto(titulo)
                         link = DOMINIO_LIDER + url_relativa if url_relativa.startswith("/") else url_relativa
+                        link = normalizar_link(link)
                         descuento = round((1 - (precio_oferta / precio_normal)) * 100)
                         if link in productos_por_link:
                             continue
@@ -771,13 +806,7 @@ def procesar_tarjeta_mercadolibre(tarjeta):
         enlace = tarjeta.find("a", href=True)
     if not enlace or not enlace.get("href"):
         return None
-    # OJO: las tarjetas de MercadoLibre traen parámetros de tracking en la
-    # URL (?pdp_filters=..., &position=..., etc.) que cambian en CADA
-    # pasada aunque sea el MISMO producto. Si no los sacamos, el historial
-    # (que usa el link como llave para no repetir ofertas) piensa que es
-    # un producto "nuevo" cada vez -> por eso llegaba la misma oferta una
-    # y otra vez. Nos quedamos solo con la parte de la URL antes del "?".
-    link = enlace["href"].split("#")[0].split("?")[0]
+    link = normalizar_link(enlace["href"])
     titulo = reparar_texto(enlace.get_text(strip=True))
     if not titulo:
         titulo_tag = tarjeta.find(class_=lambda c: c and "title" in c)
@@ -947,7 +976,7 @@ def buscar_ofertas_jumbo():
                 for precio_oferta, precio_normal, nombre in crudos:
                     if precio_oferta >= precio_normal or precio_normal == 0:
                         continue
-                    link = mapa_url.get(nombre)
+                    link = normalizar_link(mapa_url.get(nombre))
                     if not link:
                         sin_url += 1
                         continue
@@ -984,7 +1013,7 @@ def procesar_tarjeta_dbs(tarjeta):
     if not enlace_nombre:
         return None
     titulo = reparar_texto(enlace_nombre.get_text(strip=True))
-    link = enlace_nombre.get("href")
+    link = normalizar_link(enlace_nombre.get("href"))
     precio_oferta_tag = tarjeta.find("span", id=lambda v: v and v.startswith("product-price-"))
     precio_normal_tag = tarjeta.find("span", id=lambda v: v and v.startswith("old-price-"))
     if not precio_oferta_tag or not precio_normal_tag:
@@ -1186,6 +1215,9 @@ def activar_candado_energia():
         print("🔒 Candado de energía activado (termux-wake-lock).", flush=True)
     except Exception:
         pass
+def _pid_esta_vivo(pid):
+    # En Linux/Termux, /proc/<pid> solo existe si ese proceso sigue vivo.
+    return os.path.exists(f"/proc/{pid}")
 def hay_otro_proceso_corriendo():
     """
     Revisa si ARCHIVO_LOCK existe Y si el PID que dice adentro sigue vivo.
@@ -1202,11 +1234,33 @@ def hay_otro_proceso_corriendo():
     except (ValueError, OSError):
         # El lock está corrupto/vacío: lo tratamos como si no existiera.
         return False
-    # En Linux/Termux, /proc/<pid> solo existe si ese proceso sigue vivo.
-    return os.path.exists(f"/proc/{pid_anterior}")
+    return _pid_esta_vivo(pid_anterior)
 def tomar_lock():
-    with open(ARCHIVO_LOCK, "w", encoding="utf-8") as archivo:
-        archivo.write(str(os.getpid()))
+    """
+    Crea ARCHIVO_LOCK de forma ATÓMICA (abre con O_CREAT|O_EXCL: falla si
+    el archivo ya existe). Esto cierra una ventana de carrera: si dos
+    procesos arrancan casi al mismo tiempo, "revisar si el lock existe" y
+    "escribir el lock" NO pueden pisarse entre sí como pasaría con un
+    simple if-existe / escribir por separado.
+    Si el archivo ya existe pero el PID de adentro está muerto (quedó
+    "pegado" de una corrida anterior que no se cerró bien), lo limpiamos y
+    reintentamos una vez.
+    """
+    for intento in range(2):
+        try:
+            fd = os.open(ARCHIVO_LOCK, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+            with os.fdopen(fd, "w", encoding="utf-8") as archivo:
+                archivo.write(str(os.getpid()))
+            return True
+        except FileExistsError:
+            if hay_otro_proceso_corriendo():
+                return False
+            # Lock viejo/huérfano (proceso muerto): lo limpiamos y reintentamos.
+            try:
+                os.remove(ARCHIVO_LOCK)
+            except OSError:
+                pass
+    return False
 def liberar_lock():
     try:
         os.remove(ARCHIVO_LOCK)
@@ -1216,13 +1270,12 @@ if __name__ == "__main__":
     print("=" * 50, flush=True)
     print(f"🤖 Modo de ejecución: {MODO.upper()}", flush=True)
     print(f"🗂️ Cuaderno de memoria: {ARCHIVO_HISTORIAL}", flush=True)
-    if hay_otro_proceso_corriendo():
+    if not tomar_lock():
         print("⛔ Ya hay OTRA copia de cazador_ofertas.py corriendo (mismo cuaderno de", flush=True)
         print("   memoria). Para no mandar ofertas duplicadas, esta copia se cierra sin", flush=True)
         print("   hacer nada. Si estás seguro de que no hay otra corriendo, borra el", flush=True)
         print(f"   archivo '{ARCHIVO_LOCK}' y vuelve a intentar.", flush=True)
         sys.exit(1)
-    tomar_lock()
     try:
         if MODO == "nube":
             print("ℹ️ El modo nube no tiene tiendas asignadas actualmente.", flush=True)
