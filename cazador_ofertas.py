@@ -49,6 +49,25 @@
 #   simples. No es viable corriéndolo liviano en Termux; si se agrega,
 #   debería ser aparte (ej: en la nube con Playwright), no en el bucle
 #   del celular.
+# - ARREGLO "manda las mismas ofertas" (repetidas): se encontraron y
+#   arreglaron 3 causas, todas verificadas con tests:
+#   1) MercadoLibre: cada tarjeta trae en su URL parámetros de tracking
+#      (?pdp_filters=..., &position=...) que CAMBIAN aunque sea el mismo
+#      producto. El historial usa el link como llave para no repetir, así
+#      que veía "un producto nuevo" en cada pasada. Ahora se guarda solo
+#      la URL sin "?...".
+#   2) Dos copias del bot corriendo a la vez (ej: la dejaste corriendo y
+#      la volviste a abrir, o vigilante.sh + una corrida manual) hacían
+#      que cada copia mandara sus propias alertas sin saber de la otra.
+#      Ahora hay un candado (cazador.lock con el PID) que impide que
+#      arranque una segunda copia mientras la primera siga viva.
+#   3) Si el proceso se cortaba (batería, Android matando la app) justo
+#      mientras se guardaba el historial, el archivo podía quedar a medio
+#      escribir y corromperse, perdiendo la memoria de qué ya se mandó.
+#      Ahora el guardado es "atómico" (escribe en un archivo temporal y
+#      recién al final lo reemplaza) y si igual encuentra un historial
+#      corrupto, lo respalda como .corrupto y sigue con uno nuevo en vez
+#      de crashear cada pasada.
 import requests
 import json
 import os
@@ -190,6 +209,10 @@ if MODO == "nube":
     ARCHIVO_HISTORIAL = "historial_ofertas.json"
 else:
     ARCHIVO_HISTORIAL = "historial_local.json"
+# Candado para que no queden DOS copias del bot corriendo a la vez (eso
+# manda ofertas duplicadas, porque cada copia tiene su propia foto del
+# historial en memoria y no se entera de lo que la otra ya mandó).
+ARCHIVO_LOCK = "cazador.lock"
 SEGUNDOS_ENTRE_MENSAJES = 2.5
 # Headers "de navegador real" (Chrome en Windows).
 CABECERAS = {
@@ -306,11 +329,29 @@ def imprimir_diagnostico_bloqueo(respuesta):
 def cargar_historial():
     if not os.path.exists(ARCHIVO_HISTORIAL):
         return {}
-    with open(ARCHIVO_HISTORIAL, "r", encoding="utf-8") as archivo:
-        return json.load(archivo)
+    try:
+        with open(ARCHIVO_HISTORIAL, "r", encoding="utf-8") as archivo:
+            return json.load(archivo)
+    except json.JSONDecodeError:
+        # Probablemente Android mató el proceso justo mientras se estaba
+        # guardando el archivo, y quedó a medio escribir. En vez de
+        # reventar en cada pasada (y no mandar NADA nunca más), lo
+        # guardamos como respaldo y arrancamos un historial nuevo.
+        respaldo = ARCHIVO_HISTORIAL + ".corrupto"
+        print(f"⚠️ {ARCHIVO_HISTORIAL} estaba corrupto (probablemente un corte a medio guardar). Lo dejo como {respaldo} y empiezo un historial nuevo.", flush=True)
+        try:
+            os.replace(ARCHIVO_HISTORIAL, respaldo)
+        except OSError:
+            pass
+        return {}
 def guardar_historial(historial):
-    with open(ARCHIVO_HISTORIAL, "w", encoding="utf-8") as archivo:
+    # Escritura atómica: primero a un archivo temporal, y recién al final
+    # se reemplaza el archivo real. Así, si el proceso muere a mitad de
+    # camino, el historial de verdad nunca queda corrupto a medias.
+    archivo_temporal = ARCHIVO_HISTORIAL + ".tmp"
+    with open(archivo_temporal, "w", encoding="utf-8") as archivo:
         json.dump(historial, archivo, indent=4, ensure_ascii=False)
+    os.replace(archivo_temporal, ARCHIVO_HISTORIAL)
 # ---------------------------------------------------------------------
 # LECTOR: FALABELLA (por categorías, con paginación)
 # ---------------------------------------------------------------------
@@ -730,7 +771,13 @@ def procesar_tarjeta_mercadolibre(tarjeta):
         enlace = tarjeta.find("a", href=True)
     if not enlace or not enlace.get("href"):
         return None
-    link = enlace["href"].split("#")[0]
+    # OJO: las tarjetas de MercadoLibre traen parámetros de tracking en la
+    # URL (?pdp_filters=..., &position=..., etc.) que cambian en CADA
+    # pasada aunque sea el MISMO producto. Si no los sacamos, el historial
+    # (que usa el link como llave para no repetir ofertas) piensa que es
+    # un producto "nuevo" cada vez -> por eso llegaba la misma oferta una
+    # y otra vez. Nos quedamos solo con la parte de la URL antes del "?".
+    link = enlace["href"].split("#")[0].split("?")[0]
     titulo = reparar_texto(enlace.get_text(strip=True))
     if not titulo:
         titulo_tag = tarjeta.find(class_=lambda c: c and "title" in c)
@@ -1139,32 +1186,68 @@ def activar_candado_energia():
         print("🔒 Candado de energía activado (termux-wake-lock).", flush=True)
     except Exception:
         pass
+def hay_otro_proceso_corriendo():
+    """
+    Revisa si ARCHIVO_LOCK existe Y si el PID que dice adentro sigue vivo.
+    Dos copias del bot corriendo a la vez es otra forma de mandar ofertas
+    duplicadas: cada copia carga su propia versión del historial en
+    memoria al empezar, así que ninguna de las dos se entera de lo que la
+    otra ya mandó, y las dos terminan avisando lo mismo.
+    """
+    if not os.path.exists(ARCHIVO_LOCK):
+        return False
+    try:
+        with open(ARCHIVO_LOCK, "r", encoding="utf-8") as archivo:
+            pid_anterior = int(archivo.read().strip())
+    except (ValueError, OSError):
+        # El lock está corrupto/vacío: lo tratamos como si no existiera.
+        return False
+    # En Linux/Termux, /proc/<pid> solo existe si ese proceso sigue vivo.
+    return os.path.exists(f"/proc/{pid_anterior}")
+def tomar_lock():
+    with open(ARCHIVO_LOCK, "w", encoding="utf-8") as archivo:
+        archivo.write(str(os.getpid()))
+def liberar_lock():
+    try:
+        os.remove(ARCHIVO_LOCK)
+    except OSError:
+        pass
 if __name__ == "__main__":
     print("=" * 50, flush=True)
     print(f"🤖 Modo de ejecución: {MODO.upper()}", flush=True)
     print(f"🗂️ Cuaderno de memoria: {ARCHIVO_HISTORIAL}", flush=True)
-    if MODO == "nube":
-        print("ℹ️ El modo nube no tiene tiendas asignadas actualmente.", flush=True)
-    elif MODO == "bucle":
-        activar_candado_energia()
-        print(f"🔁 Bucle iniciado: una pasada cada {MINUTOS_ENTRE_PASADAS} minutos. CTRL+C para detener.", flush=True)
-        numero_pasada = 0
-        try:
-            while True:
-                numero_pasada += 1
-                print("\n" + "=" * 50, flush=True)
-                print(f"🕐 {time.strftime('%H:%M:%S')} — Pasada #{numero_pasada}", flush=True)
-                try:
-                    hacer_una_pasada()
-                except Exception as error:
-                    print(f"💥 La pasada #{numero_pasada} falló ({error}). El bucle sigue vivo.", flush=True)
-                print(f"😴 {time.strftime('%H:%M:%S')} — Durmiendo {MINUTOS_ENTRE_PASADAS} minutos...", flush=True)
-                time.sleep(MINUTOS_ENTRE_PASADAS * 60)
-        except KeyboardInterrupt:
-            print("\n🛑 Bucle detenido a mano. ¡Hasta la próxima!", flush=True)
-    else:
-        segundos_espera = random.randint(5, 40)
-        print(f"⏳ Esperando {segundos_espera} segundos antes de empezar...", flush=True)
-        time.sleep(segundos_espera)
-        hacer_una_pasada()
-        print("Historial actualizado.", flush=True)
+    if hay_otro_proceso_corriendo():
+        print("⛔ Ya hay OTRA copia de cazador_ofertas.py corriendo (mismo cuaderno de", flush=True)
+        print("   memoria). Para no mandar ofertas duplicadas, esta copia se cierra sin", flush=True)
+        print("   hacer nada. Si estás seguro de que no hay otra corriendo, borra el", flush=True)
+        print(f"   archivo '{ARCHIVO_LOCK}' y vuelve a intentar.", flush=True)
+        sys.exit(1)
+    tomar_lock()
+    try:
+        if MODO == "nube":
+            print("ℹ️ El modo nube no tiene tiendas asignadas actualmente.", flush=True)
+        elif MODO == "bucle":
+            activar_candado_energia()
+            print(f"🔁 Bucle iniciado: una pasada cada {MINUTOS_ENTRE_PASADAS} minutos. CTRL+C para detener.", flush=True)
+            numero_pasada = 0
+            try:
+                while True:
+                    numero_pasada += 1
+                    print("\n" + "=" * 50, flush=True)
+                    print(f"🕐 {time.strftime('%H:%M:%S')} — Pasada #{numero_pasada}", flush=True)
+                    try:
+                        hacer_una_pasada()
+                    except Exception as error:
+                        print(f"💥 La pasada #{numero_pasada} falló ({error}). El bucle sigue vivo.", flush=True)
+                    print(f"😴 {time.strftime('%H:%M:%S')} — Durmiendo {MINUTOS_ENTRE_PASADAS} minutos...", flush=True)
+                    time.sleep(MINUTOS_ENTRE_PASADAS * 60)
+            except KeyboardInterrupt:
+                print("\n🛑 Bucle detenido a mano. ¡Hasta la próxima!", flush=True)
+        else:
+            segundos_espera = random.randint(5, 40)
+            print(f"⏳ Esperando {segundos_espera} segundos antes de empezar...", flush=True)
+            time.sleep(segundos_espera)
+            hacer_una_pasada()
+            print("Historial actualizado.", flush=True)
+    finally:
+        liberar_lock()
