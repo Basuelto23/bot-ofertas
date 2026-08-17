@@ -1,5 +1,6 @@
-# CAZADOR DE OFERTAS: explora varias tiendas (Falabella, DBS, Paris, Easy, Lider),
-# encuentra productos con descuento, evita duplicados, y publica cada uno en
+# CAZADOR DE OFERTAS: explora varias tiendas (Falabella, DBS, Paris, Easy,
+# Lider, MercadoLibre, Jumbo, Hites, La Polar/abc), encuentra productos con
+# descuento, evita duplicados, y publica cada uno en
 # el canal correcto (gratis o premium) según qué tan buena sea la oferta.
 # Los descuentos gigantes (75%+) se marcan como POSIBLE ERROR DE PRECIO.
 # Los productos que calcen con lista_deseos.txt se marcan con 🎯 y se
@@ -44,11 +45,31 @@
 #   varios cientos de MB de datos móviles). MAX_PAGINAS_JUMBO controla
 #   cuántas se revisan; súbelo si tienes WiFi ilimitado y quieres más
 #   cobertura, bájalo si te preocupan los datos móviles.
-# - AliExpress: NO agregado todavía. Tiene protección anti-bot fuerte
-#   (Cloudflare) y normalmente exige un navegador real, no pedidos HTTP
-#   simples. No es viable corriéndolo liviano en Termux; si se agrega,
-#   debería ser aparte (ej: en la nube con Playwright), no en el bucle
-#   del celular.
+# - AliExpress: NO agregado todavía (re-confirmado el 17-ago). Sigue
+#   protegido por un anti-bot fuerte tipo Cloudflare que normalmente exige
+#   un navegador real, no pedidos HTTP simples — así que no corresponde
+#   intentar sortearlo desde acá. No es viable corriéndolo liviano en
+#   Termux; si se agrega alguna vez, debería ser aparte (ej: en la nube
+#   con Playwright), no en el bucle del celular.
+# - Hites: AGREGADO el 17-ago. Usa la misma familia de plataforma que
+#   Falabella/DBS (Salesforce Commerce Cloud) pero renderiza los
+#   productos como tarjetas HTML normales (clase "product-tile"), no en
+#   un bloque JSON como Falabella. OJO con una trampa: TODAS las tarjetas
+#   traen escrito "¡SIN STOCK!" en el HTML (se muestra/oculta con CSS que
+#   nuestro scraper no ve), así que NO se puede usar eso para saber si
+#   hay stock real — en cambio, se usa si existe un precio de oferta
+#   (".sales .value"). Pagina con ?start=N&sz=36 (36 productos por
+#   página). Verificado con navegador real.
+# - La Polar: AGREGADO el 17-ago, aunque con un giro: el dominio
+#   "lapolar.cl" ahora redirige a "abc.cl" (la marca se renombró). No
+#   existe una página "/ofertas" genérica (da 404 - "La página que buscas
+#   no existe"); la sección pública con descuentos reales que sí funciona
+#   sin iniciar sesión es "Ofertas Exclusivas Tarjeta Abc"
+#   (/especial/ofertas-exclusivas-tarjeta-abc/). Misma familia de
+#   plataforma que Hites (paginación ?start=N&sz=36), pero con sus
+#   propias clases ("lp-product-tile", precios en ".js-internet-price" /
+#   ".js-normal-price"). Verificado con navegador real. En el bot/canal
+#   aparece como tienda "LaPolar" para que se entienda de qué tienda es.
 # - ARREGLO "manda las mismas ofertas" (repetidas): se encontraron y
 #   arreglaron 3 causas, todas verificadas con tests:
 #   1) MercadoLibre: cada tarjeta trae en su URL parámetros de tracking
@@ -213,6 +234,26 @@ CATEGORIAS_JUMBO = [
 ]
 MAX_PAGINAS_JUMBO = 8
 DOMINIO_JUMBO = "https://www.jumbo.cl"
+# HITES — usa la misma plataforma que Falabella/DBS en el fondo (Salesforce
+# Commerce Cloud), pero renderiza los productos como tarjetas HTML normales
+# ("product-tile"), no en un bloque JSON. Pagina con ?start=N&sz=36 (offset
+# de a 36 productos). Verificado con navegador real.
+CATEGORIAS_HITES = [
+    "https://www.hites.com/ofertas/",
+]
+MAX_PAGINAS_HITES = 5
+DOMINIO_HITES = "https://www.hites.com"
+# LA POLAR — la marca/dominio "lapolar.cl" ahora redirige a "abc.cl" (se
+# renombraron). No existe una página genérica "/ofertas" (da 404); la
+# sección pública con descuentos reales que SÍ funciona sin iniciar sesión
+# es "Ofertas Exclusivas Tarjeta Abc". Misma plataforma que Hites (mismo
+# patrón de tarjetas), paginación ?start=N&sz=36. Verificado con navegador
+# real.
+CATEGORIAS_ABC = [
+    "https://www.abc.cl/especial/ofertas-exclusivas-tarjeta-abc/",
+]
+MAX_PAGINAS_ABC = 5
+DOMINIO_ABC = "https://www.abc.cl"
 DESCUENTO_MINIMO_GRATIS = 30      # 30% a 49% -> canal gratis
 DESCUENTO_MINIMO_PREMIUM = 50     # 50% a 74% -> canal premium
 DESCUENTO_POSIBLE_ERROR = 75      # 75% o más -> premium con alerta de POSIBLE ERROR
@@ -1064,6 +1105,151 @@ def buscar_ofertas_dbs():
     print(f"   ✅ {len(productos_por_link)} producto(s) único(s) en DBS.", flush=True)
     return list(productos_por_link.values())
 # ---------------------------------------------------------------------
+# LECTOR: HITES
+# ---------------------------------------------------------------------
+def limpiar_precio_hites(texto):
+    texto = re.sub(r"[^0-9]", "", texto or "")
+    return int(texto) if texto else None
+def procesar_tarjeta_hites(tarjeta):
+    # Ojo: TODAS las tarjetas traen el bloque "¡SIN STOCK!" en el HTML,
+    # esté o no agotado el producto (se muestra/oculta con CSS, que acá no
+    # existe). Por eso NO revisamos ese bloque para decidir si hay stock:
+    # nos basamos en si existe un precio de oferta real (.sales .value).
+    enlace = tarjeta.select_one("a.product-name--bundle") or tarjeta.select_one("a[href]")
+    if not enlace or not enlace.get("href"):
+        return None
+    link = enlace["href"]
+    if link.startswith("/"):
+        link = DOMINIO_HITES + link
+    link = normalizar_link(link)
+    titulo = reparar_texto(enlace.get_text(strip=True))
+    if not titulo:
+        h3 = tarjeta.find("h3")
+        titulo = reparar_texto(h3.get_text(strip=True)) if h3 else None
+    if not titulo:
+        return None
+    precio_oferta_tag = tarjeta.select_one(".sales .value")
+    precio_normal_tag = tarjeta.select_one(".list .value, .strike-through .value")
+    if not precio_oferta_tag or not precio_normal_tag:
+        return None
+    precio_oferta = precio_oferta_tag.get("content") or precio_oferta_tag.get_text()
+    precio_normal = precio_normal_tag.get("content") or precio_normal_tag.get_text()
+    precio_oferta = limpiar_precio_hites(precio_oferta)
+    precio_normal = limpiar_precio_hites(precio_normal)
+    if not precio_oferta or not precio_normal or precio_oferta >= precio_normal:
+        return None
+    descuento = round((1 - (precio_oferta / precio_normal)) * 100)
+    return {
+        "tienda": "Hites",
+        "categoria": "General",
+        "titulo": titulo,
+        "precio_oferta": precio_oferta,
+        "precio_normal": precio_normal,
+        "descuento": descuento,
+        "link": link
+    }
+def buscar_ofertas_hites():
+    print("🔍 Buscando ofertas en Hites...", flush=True)
+    productos_por_link = {}
+    for categoria in CATEGORIAS_HITES:
+        for numero_pagina in range(MAX_PAGINAS_HITES):
+            inicio = numero_pagina * 36
+            separador = "&" if "?" in categoria else "?"
+            url = categoria if inicio == 0 else f"{categoria}{separador}start={inicio}&sz=36"
+            try:
+                respuesta = pedir_pagina(url)
+                if respuesta is None:
+                    print(f"   ⚠️ No pude conectarme a Hites pág. {numero_pagina + 1}.", flush=True)
+                    break
+                if respuesta.status_code != 200:
+                    print(f"   ⚠️ Hites pág. {numero_pagina + 1} respondió código {respuesta.status_code}.", flush=True)
+                    break
+                sopa = BeautifulSoup(respuesta.text, "lxml")
+                tarjetas = sopa.select(".product-tile")
+                if not tarjetas:
+                    print(f"   ⚠️ Hites pág. {numero_pagina + 1}: 0 tarjetas de producto.", flush=True)
+                    break
+                antes = len(productos_por_link)
+                for tarjeta in tarjetas:
+                    producto = procesar_tarjeta_hites(tarjeta)
+                    if producto:
+                        productos_por_link[producto["link"]] = producto
+                print(f"   📄 Hites pág. {numero_pagina + 1}: {len(productos_por_link) - antes} producto(s) nuevo(s) con descuento ({len(tarjetas)} tarjetas en la página).", flush=True)
+            except Exception as error:
+                print(f"   ⚠️ Error en Hites pág. {numero_pagina + 1}: {error}", flush=True)
+                break
+            time.sleep(random.uniform(2, 4))
+    print(f"   ✅ {len(productos_por_link)} producto(s) único(s) en Hites.", flush=True)
+    return list(productos_por_link.values())
+# ---------------------------------------------------------------------
+# LECTOR: LA POLAR (ahora "abc")
+# ---------------------------------------------------------------------
+def limpiar_precio_abc(texto):
+    texto = re.sub(r"[^0-9]", "", texto or "")
+    return int(texto) if texto else None
+def procesar_tarjeta_abc(tarjeta):
+    enlace = tarjeta.select_one("a.link") or tarjeta.select_one("a[href]")
+    if not enlace or not enlace.get("href"):
+        return None
+    link = enlace["href"]
+    if link.startswith("/"):
+        link = DOMINIO_ABC + link
+    link = normalizar_link(link)
+    titulo = reparar_texto(enlace.get_text(strip=True))
+    if not titulo:
+        return None
+    precio_oferta_tag = tarjeta.select_one(".js-internet-price .price-value")
+    precio_normal_tag = tarjeta.select_one(".js-normal-price .price-value")
+    if not precio_oferta_tag or not precio_normal_tag:
+        return None
+    precio_oferta = limpiar_precio_abc(precio_oferta_tag.get_text())
+    precio_normal = limpiar_precio_abc(precio_normal_tag.get_text())
+    if not precio_oferta or not precio_normal or precio_oferta >= precio_normal:
+        return None
+    descuento = round((1 - (precio_oferta / precio_normal)) * 100)
+    return {
+        "tienda": "LaPolar",
+        "categoria": "General",
+        "titulo": titulo,
+        "precio_oferta": precio_oferta,
+        "precio_normal": precio_normal,
+        "descuento": descuento,
+        "link": link
+    }
+def buscar_ofertas_abc():
+    print("🔍 Buscando ofertas en La Polar (abc)...", flush=True)
+    productos_por_link = {}
+    for categoria in CATEGORIAS_ABC:
+        for numero_pagina in range(MAX_PAGINAS_ABC):
+            inicio = numero_pagina * 36
+            separador = "&" if "?" in categoria else "?"
+            url = categoria if inicio == 0 else f"{categoria}{separador}start={inicio}&sz=36"
+            try:
+                respuesta = pedir_pagina(url)
+                if respuesta is None:
+                    print(f"   ⚠️ No pude conectarme a La Polar pág. {numero_pagina + 1}.", flush=True)
+                    break
+                if respuesta.status_code != 200:
+                    print(f"   ⚠️ La Polar pág. {numero_pagina + 1} respondió código {respuesta.status_code}.", flush=True)
+                    break
+                sopa = BeautifulSoup(respuesta.text, "lxml")
+                tarjetas = sopa.select(".lp-product-tile")
+                if not tarjetas:
+                    print(f"   ⚠️ La Polar pág. {numero_pagina + 1}: 0 tarjetas de producto.", flush=True)
+                    break
+                antes = len(productos_por_link)
+                for tarjeta in tarjetas:
+                    producto = procesar_tarjeta_abc(tarjeta)
+                    if producto:
+                        productos_por_link[producto["link"]] = producto
+                print(f"   📄 La Polar pág. {numero_pagina + 1}: {len(productos_por_link) - antes} producto(s) nuevo(s) con descuento ({len(tarjetas)} tarjetas en la página).", flush=True)
+            except Exception as error:
+                print(f"   ⚠️ Error en La Polar pág. {numero_pagina + 1}: {error}", flush=True)
+                break
+            time.sleep(random.uniform(2, 4))
+    print(f"   ✅ {len(productos_por_link)} producto(s) único(s) en La Polar.", flush=True)
+    return list(productos_por_link.values())
+# ---------------------------------------------------------------------
 # ENVÍO A TELEGRAM (blindado contra cortes de conexión)
 # ---------------------------------------------------------------------
 def enviar_alerta_telegram(datos, chat_id, es_premium):
@@ -1197,6 +1383,10 @@ def hacer_una_pasada():
     todos_los_productos += buscar_ofertas_mercadolibre()
     time.sleep(3)
     todos_los_productos += buscar_ofertas_jumbo()
+    time.sleep(3)
+    todos_los_productos += buscar_ofertas_hites()
+    time.sleep(3)
+    todos_los_productos += buscar_ofertas_abc()
     print(f"\n📦 Total combinado: {len(todos_los_productos)} producto(s).\n", flush=True)
     historial = cargar_historial()
     candidatos = [p for p in todos_los_productos if califica_para_enviar(p, historial, lista_deseos)]
